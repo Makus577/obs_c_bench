@@ -23,6 +23,7 @@ csdk_demo/
 test_bin_cache/
 test_reports_out/
 test_logs_out/
+test_perf_gate_out/
 
 # 数据文件
 temptoken.dat

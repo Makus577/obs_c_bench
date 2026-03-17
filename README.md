@@ -7,6 +7,7 @@
 * 通过 CLI 显式指定 `config.dat` / `users.dat`
 * 用命令行覆盖操作类型、总并发数、对象大小
 * 通过 CLI 分别指定报告导出目录和日志目录
+* 通过 `archive.csv`、基线清单与门禁脚本做性能基线对比
 * 在 Linux x86 / ARM 环境下采集 CPU、RSS、TPS、BPS、平均时延、P99 时延、单流带宽
 * 默认将报告输出到 `reports/`，日志输出到 `logs/`
 * 通过 `make sdk-bootstrap` 或 `OBS_SDK_ROOT=/path make` 显式引入真实 OBS C SDK
@@ -230,6 +231,7 @@ user2, YOUR_AK_2, YOUR_SK_2
 | `--op <value>` | 覆盖操作类型，支持 `upload/download/delete/multipart/resumable/mix` 或 `201/202/204/216/230/900` | `--op upload` |
 | `--threads <N>` | 覆盖总并发线程数；多用户时会按用户均分，余数从前往后补齐 | `--threads 1024` |
 | `--object-size <spec>` | 覆盖对象大小，支持纯字节数、十进制单位和区间 | `--object-size 1MB~16MB` |
+| `--scenario-id <id>` | 显式指定固定压测场景 ID，便于性能基线对比和 CI 门禁 | `--scenario-id upload_1mb_128t` |
 | `--output-dir <path>` | 仅控制报告导出目录，作用于 `archive.csv`、`brief.txt` | `--output-dir /data/reports` |
 | `--log-dir <path>` | 仅控制日志目录，作用于 `realtime.txt`、`detail_*.csv` | `--log-dir /data/logs` |
 
@@ -330,6 +332,10 @@ CSV 格式，列定义如下：
 * `p99_latency_ms`
 * `avg_single_stream_bps`
 * `max_single_stream_bps`
+* `scenario_id`
+* `git_commit`
+* `host_os`
+* `host_arch`
 
 ### 指标口径说明
 
@@ -355,6 +361,49 @@ CSV 格式，列定义如下：
 * 内存通过读取 `/proc/self/status` 中的 `VmRSS` 获取
 * 若任务运行不足 3 秒，程序会在结束阶段强制补采样一次，因此 `realtime.txt` 仍然会有完整指标，`archive.csv` / `brief.txt` 也会得到完整汇总
 * 若极端环境下无法读取 RSS，则对应字段会写为 `-1`，不会中断压测流程
+
+### 性能基线对比与 CI 门禁
+
+当前仓库已提供平台无关的性能对比与门禁脚本，便于后续接入 Jenkins、GitLab CI、DevCloud 等 CI 平台。
+
+关键文件如下：
+
+* `ci/perf/baselines.csv`: 场景到基线 `archive.csv` 的映射清单
+* `ci/perf/gate_policy.json`: 默认保守门禁策略
+* `scripts/reporting/compare_archive.py`: 对比两份 `archive.csv`
+* `scripts/reporting/perf_gate.py`: 基于策略执行性能门禁
+
+手工对比示例：
+
+```bash
+python3 scripts/reporting/compare_archive.py \
+  --baseline /path/to/baseline/archive.csv \
+  --candidate /path/to/candidate/archive.csv \
+  --output-dir ./compare_out
+```
+
+门禁执行示例：
+
+```bash
+python3 scripts/reporting/perf_gate.py \
+  --candidate /path/to/candidate/archive.csv \
+  --baselines-manifest ./ci/perf/baselines.csv \
+  --scenario-id upload_1mb_128t \
+  --policy ./ci/perf/gate_policy.json \
+  --output-dir ./gate_out
+```
+
+脚本会输出：
+
+* `compare.csv`
+* `compare.md`
+* `gate_result.json`
+
+退出码约定：
+
+* `0`: 门禁通过
+* `1`: 检测到明显性能回退
+* `2`: 输入不合法或基线/候选数据不可比
 
 ### 一键生成分析看板
 

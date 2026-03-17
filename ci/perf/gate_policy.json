@@ -1,0 +1,80 @@
+{
+  "required_match_fields": [
+    "op",
+    "total_threads",
+    "object_size_spec",
+    "users_loaded"
+  ],
+  "metrics": {
+    "final_tps": {
+      "label": "Final TPS",
+      "direction": "higher",
+      "enabled": true,
+      "warn_threshold_pct": 3.0,
+      "fail_threshold_pct": 5.0
+    },
+    "final_bps_bytes_per_sec": {
+      "label": "Final BPS",
+      "direction": "higher",
+      "enabled": true,
+      "warn_threshold_pct": 3.0,
+      "fail_threshold_pct": 5.0
+    },
+    "avg_latency_ms": {
+      "label": "Avg Latency",
+      "direction": "lower",
+      "enabled": true,
+      "warn_threshold_pct": 5.0,
+      "fail_threshold_pct": 8.0
+    },
+    "p99_latency_ms": {
+      "label": "P99 Latency",
+      "direction": "lower",
+      "enabled": true,
+      "warn_threshold_pct": 7.0,
+      "fail_threshold_pct": 10.0
+    },
+    "avg_cpu_pct": {
+      "label": "Avg CPU",
+      "direction": "lower",
+      "enabled": true,
+      "warn_threshold_pct": 7.0,
+      "fail_threshold_pct": 10.0
+    },
+    "peak_tps": {
+      "label": "Peak TPS",
+      "direction": "higher",
+      "enabled": false
+    },
+    "peak_bps_bytes_per_sec": {
+      "label": "Peak BPS",
+      "direction": "higher",
+      "enabled": false
+    },
+    "peak_cpu_pct": {
+      "label": "Peak CPU",
+      "direction": "lower",
+      "enabled": false
+    },
+    "avg_rss_mb": {
+      "label": "Avg RSS",
+      "direction": "lower",
+      "enabled": false
+    },
+    "peak_rss_mb": {
+      "label": "Peak RSS",
+      "direction": "lower",
+      "enabled": false
+    },
+    "avg_single_stream_bps": {
+      "label": "Avg Single Stream",
+      "direction": "higher",
+      "enabled": false
+    },
+    "max_single_stream_bps": {
+      "label": "Max Single Stream",
+      "direction": "higher",
+      "enabled": false
+    }
+  }
+}

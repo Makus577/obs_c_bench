@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <signal.h>
 #include <getopt.h>
+#include <sys/utsname.h>
 
 volatile sig_atomic_t g_graceful_stop = 0;
 
@@ -38,6 +39,7 @@ typedef struct {
     char users_file[PATH_MAX];
     char output_dir[PATH_MAX];
     char log_dir[PATH_MAX];
+    char scenario_id[128];
     char object_size_spec[64];
     int op_set;
     int op;
@@ -133,6 +135,35 @@ static int ensure_directory(const char *path) {
         return -1;
     }
     return 0;
+}
+
+static void detect_host_metadata(Config *cfg) {
+    struct utsname uts;
+
+    if (uname(&uts) == 0) {
+        snprintf(cfg->host_os, sizeof(cfg->host_os), "%s", uts.sysname);
+        snprintf(cfg->host_arch, sizeof(cfg->host_arch), "%s", uts.machine);
+    } else {
+        snprintf(cfg->host_os, sizeof(cfg->host_os), "%s", "unknown");
+        snprintf(cfg->host_arch, sizeof(cfg->host_arch), "%s", "unknown");
+    }
+}
+
+static void load_git_commit_metadata(Config *cfg) {
+    const char *git_commit = getenv("OBS_BENCH_GIT_COMMIT");
+
+    if (git_commit && git_commit[0] != '\0') {
+        snprintf(cfg->git_commit, sizeof(cfg->git_commit), "%s", git_commit);
+    } else {
+        snprintf(cfg->git_commit, sizeof(cfg->git_commit), "%s", "unknown");
+    }
+}
+
+static void infer_scenario_id(const Config *cfg, char *buf, size_t buf_size) {
+    snprintf(buf, buf_size, "%s_%s_%dt",
+             test_case_to_name(cfg->test_case),
+             cfg->object_size_spec[0] ? cfg->object_size_spec : "default",
+             cfg->threads > 0 ? cfg->threads : 0);
 }
 
 static void str_tolower(char *dst, const char *src) {
@@ -323,6 +354,7 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
         {"op", required_argument, 0, 'o'},
         {"threads", required_argument, 0, 't'},
         {"object-size", required_argument, 0, 's'},
+        {"scenario-id", required_argument, 0, 'S'},
         {"output-dir", required_argument, 0, 'O'},
         {"log-dir", required_argument, 0, 'L'},
         {0, 0, 0, 0}
@@ -335,7 +367,7 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
     snprintf(cli->output_dir, sizeof(cli->output_dir), "reports");
     snprintf(cli->log_dir, sizeof(cli->log_dir), "logs");
 
-    while ((opt = getopt_long(argc, argv, "c:u:o:t:s:O:L:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:u:o:t:s:S:O:L:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'c':
                 snprintf(cli->config_file, sizeof(cli->config_file), "%s", optarg);
@@ -361,6 +393,9 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
             case 's':
                 snprintf(cli->object_size_spec, sizeof(cli->object_size_spec), "%s", optarg);
                 cli->object_size_set = 1;
+                break;
+            case 'S':
+                snprintf(cli->scenario_id, sizeof(cli->scenario_id), "%s", optarg);
                 break;
             case 'O':
                 snprintf(cli->output_dir, sizeof(cli->output_dir), "%s", optarg);
@@ -415,6 +450,11 @@ static void apply_cli_overrides(Config *cfg, const CliOptions *cli) {
     if (!cfg->is_temporary_token) {
         snprintf(cfg->users_file_path, sizeof(cfg->users_file_path), "%s", cli->users_file);
     }
+    if (cli->scenario_id[0] != '\0') {
+        snprintf(cfg->scenario_id, sizeof(cfg->scenario_id), "%s", cli->scenario_id);
+    }
+    detect_host_metadata(cfg);
+    load_git_commit_metadata(cfg);
 }
 
 static const char *task_id_from_dir(const char *task_dir) {
@@ -458,8 +498,8 @@ static void save_archive_csv(Config *cfg, const BenchmarkSummary *summary) {
     fp = fopen(filepath, "w");
     if (!fp) return;
 
-    fprintf(fp, "task_id,start_time,config_file,users_file,op,users_loaded,total_threads,threads_per_user_effective,object_size_spec,actual_duration_s,total_requests,success_requests,failed_requests,success_rate_pct,avg_cpu_pct,peak_cpu_pct,avg_rss_mb,peak_rss_mb,final_tps,peak_tps,final_bps_bytes_per_sec,peak_bps_bytes_per_sec,avg_latency_ms,p99_latency_ms,avg_single_stream_bps,max_single_stream_bps\n");
-    fprintf(fp, "%s,%s,%s,%s,%s,%d,%d,%.2f,%s,%.6f,%lld,%lld,%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+    fprintf(fp, "task_id,start_time,config_file,users_file,op,users_loaded,total_threads,threads_per_user_effective,object_size_spec,actual_duration_s,total_requests,success_requests,failed_requests,success_rate_pct,avg_cpu_pct,peak_cpu_pct,avg_rss_mb,peak_rss_mb,final_tps,peak_tps,final_bps_bytes_per_sec,peak_bps_bytes_per_sec,avg_latency_ms,p99_latency_ms,avg_single_stream_bps,max_single_stream_bps,scenario_id,git_commit,host_os,host_arch\n");
+    fprintf(fp, "%s,%s,%s,%s,%s,%d,%d,%.2f,%s,%.6f,%lld,%lld,%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s,%s,%s,%s\n",
             task_id_from_dir(cfg->report_task_dir),
             timebuf,
             cfg->config_file_path,
@@ -485,7 +525,11 @@ static void save_archive_csv(Config *cfg, const BenchmarkSummary *summary) {
             summary->avg_latency_ms,
             summary->p99_latency_ms,
             summary->avg_single_stream_bps,
-            summary->max_single_stream_bps);
+            summary->max_single_stream_bps,
+            cfg->scenario_id,
+            cfg->git_commit,
+            cfg->host_os,
+            cfg->host_arch);
     fclose(fp);
 }
 
@@ -517,6 +561,10 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
     fprintf(fp, "  LogLevel:          %s\n", log_level_to_string(cfg->log_level));
     fprintf(fp, "  ConfigFile:        %s\n", cfg->config_file_path);
     fprintf(fp, "  UsersFile:         %s\n", cfg->users_file_path);
+    fprintf(fp, "  ScenarioID:        %s\n", cfg->scenario_id);
+    fprintf(fp, "  GitCommit:         %s\n", cfg->git_commit);
+    fprintf(fp, "  HostOS:            %s\n", cfg->host_os);
+    fprintf(fp, "  HostArch:          %s\n", cfg->host_arch);
     fprintf(fp, "  ReportDir:         %s\n", cfg->report_task_dir);
     fprintf(fp, "  LogDir:            %s\n", cfg->log_task_dir);
     fprintf(fp, "  Bucket(Fixed):     %s\n", cfg->bucket_name_fixed[0] ? cfg->bucket_name_fixed : "N/A");
@@ -593,6 +641,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s [config.dat|testcase] [--config FILE] [--users FILE] [--op OP] [--threads N] [--object-size SPEC] [--output-dir DIR] [--log-dir DIR]\n",
             prog);
+    fprintf(stderr, "       %s [--scenario-id ID]\n", prog);
 }
 
 int main(int argc, char **argv) {
@@ -693,6 +742,9 @@ int main(int argc, char **argv) {
         cfg.threads = cfg.loaded_user_count * cfg.threads_per_user;
     } else {
         cfg.threads = cli.threads;
+    }
+    if (cfg.scenario_id[0] == '\0') {
+        infer_scenario_id(&cfg, cfg.scenario_id, sizeof(cfg.scenario_id));
     }
 
     printf("[Config] Multi-User Mode: %d Users Loaded. Total Threads: %d\n", cfg.loaded_user_count, cfg.threads);

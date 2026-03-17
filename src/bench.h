@@ -132,6 +132,10 @@ typedef struct {
     char config_file_path[PATH_MAX];
     char users_file_path[PATH_MAX];
     char object_size_spec[64];
+    char scenario_id[128];
+    char git_commit[64];
+    char host_os[64];
+    char host_arch[64];
 
 } Config;
 

@@ -8,6 +8,7 @@ import time
 import sys
 import re
 import platform
+import json
 
 # ================= 配置区域 =================
 CONFIG_FILE = 'config.dat'
@@ -127,7 +128,7 @@ class BenchmarkTester:
             shutil.move(USERS_BAK, USERS_FILE)
         elif self.created_users and os.path.exists(USERS_FILE):
             os.remove(USERS_FILE)
-        for extra_dir in ['test_reports_out', 'test_logs_out']:
+        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out']:
             extra_path = os.path.join(self.work_dir, extra_dir)
             if os.path.exists(extra_path):
                 shutil.rmtree(extra_path)
@@ -241,7 +242,7 @@ class BenchmarkTester:
 
         cmd = (
             f"{bin_path} --config {CONFIG_FILE} --users {USERS_FILE} "
-            f"--op upload --threads 2 --object-size 1MB "
+            f"--op upload --threads 2 --object-size 1MB --scenario-id smoke_upload_1mb_2t "
             f"--output-dir {custom_report_root} --log-dir {custom_log_root}"
         )
         ret, output = self.run_cmd(cmd)
@@ -292,11 +293,97 @@ class BenchmarkTester:
         if "object_size_spec" not in archive_text or ",1MB," not in archive_text:
             print("[FAIL] archive.csv missing object size override evidence.")
             return False
+        if "scenario_id" not in archive_text or "smoke_upload_1mb_2t" not in archive_text:
+            print("[FAIL] archive.csv missing scenario_id metadata.")
+            return False
         if "Interval_BPS(Bytes/s)" not in realtime_text:
             print("[FAIL] realtime.txt missing extended sampling header.")
             return False
 
         print(f"[PASS] Split output verification succeeded: reports={report_dir} logs={log_dir}")
+        return True
+
+    def stage_perf_gate_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 4: Perf Baseline Comparison & Gate Verification")
+        print("=" * 60)
+
+        perf_root = os.path.join(self.work_dir, "test_perf_gate_out")
+        if os.path.exists(perf_root):
+            shutil.rmtree(perf_root)
+        os.makedirs(perf_root)
+
+        fixtures_dir = os.path.join(self.work_dir, "ci", "perf", "fixtures")
+        manifest_path = os.path.join(self.work_dir, "ci", "perf", "baselines.csv")
+        policy_path = os.path.join(self.work_dir, "ci", "perf", "gate_policy.json")
+        baseline_path = os.path.join(fixtures_dir, "baseline_upload_1mb_128t.csv")
+        better_path = os.path.join(fixtures_dir, "candidate_better_upload_1mb_128t.csv")
+        worse_path = os.path.join(fixtures_dir, "candidate_worse_upload_1mb_128t.csv")
+        mismatch_path = os.path.join(fixtures_dir, "candidate_mismatch_upload_1mb_256t.csv")
+
+        compare_dir = os.path.join(perf_root, "compare")
+        ret, output = self.run_cmd(
+            f"python3 scripts/reporting/compare_archive.py --baseline {baseline_path} "
+            f"--candidate {better_path} --output-dir {compare_dir}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] compare_archive.py should succeed for comparable archives.")
+            return False
+        if not os.path.exists(os.path.join(compare_dir, "compare.csv")):
+            print("[FAIL] compare_archive.py did not produce compare.csv")
+            return False
+        if not os.path.exists(os.path.join(compare_dir, "compare.md")):
+            print("[FAIL] compare_archive.py did not produce compare.md")
+            return False
+
+        pass_dir = os.path.join(perf_root, "gate_pass")
+        ret, output = self.run_cmd(
+            f"python3 scripts/reporting/perf_gate.py --candidate {better_path} "
+            f"--policy {policy_path} --baselines-manifest {manifest_path} "
+            f"--scenario-id upload_1mb_128t --output-dir {pass_dir}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] perf_gate.py should pass for improved candidate.")
+            return False
+        with open(os.path.join(pass_dir, "gate_result.json"), "r", encoding="utf-8") as handle:
+            pass_result = json.load(handle)
+        if pass_result.get("overall_status") != "PASS":
+            print("[FAIL] perf_gate.py pass case did not report PASS.")
+            return False
+
+        fail_dir = os.path.join(perf_root, "gate_fail")
+        ret, output = self.run_cmd(
+            f"python3 scripts/reporting/perf_gate.py --baseline {baseline_path} "
+            f"--candidate {worse_path} --policy {policy_path} --output-dir {fail_dir}"
+        )
+        if ret != 1:
+            print(output)
+            print("[FAIL] perf_gate.py should return exit code 1 for regressed candidate.")
+            return False
+        with open(os.path.join(fail_dir, "gate_result.json"), "r", encoding="utf-8") as handle:
+            fail_result = json.load(handle)
+        if fail_result.get("overall_status") != "FAIL":
+            print("[FAIL] perf_gate.py fail case did not report FAIL.")
+            return False
+
+        mismatch_dir = os.path.join(perf_root, "gate_mismatch")
+        ret, output = self.run_cmd(
+            f"python3 scripts/reporting/perf_gate.py --baseline {baseline_path} "
+            f"--candidate {mismatch_path} --policy {policy_path} --output-dir {mismatch_dir}"
+        )
+        if ret != 2:
+            print(output)
+            print("[FAIL] perf_gate.py should return exit code 2 for incomparable archives.")
+            return False
+        with open(os.path.join(mismatch_dir, "gate_result.json"), "r", encoding="utf-8") as handle:
+            mismatch_result = json.load(handle)
+        if mismatch_result.get("overall_status") != "INCOMPARABLE":
+            print("[FAIL] perf_gate.py mismatch case did not report INCOMPARABLE.")
+            return False
+
+        print(f"[PASS] Perf gate verification succeeded under {perf_root}")
         return True
 
     def print_summary(self):
@@ -337,6 +424,8 @@ class BenchmarkTester:
                 sys.exit(1)
             self.stage_smoke_test()
             if not self.stage_cli_archive_test():
+                sys.exit(1)
+            if not self.stage_perf_gate_test():
                 sys.exit(1)
             self.print_summary()
         except KeyboardInterrupt:

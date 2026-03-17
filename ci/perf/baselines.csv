@@ -1,0 +1,2 @@
+scenario_id,op,threads,object_size_spec,users_loaded,baseline_label,baseline_archive_path,baseline_archive_url
+upload_1mb_128t,upload,128,1MB,1,fixture_baseline,fixtures/baseline_upload_1mb_128t.csv,
