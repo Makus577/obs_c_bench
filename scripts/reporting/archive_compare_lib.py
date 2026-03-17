@@ -14,6 +14,13 @@ DEFAULT_REQUIRED_MATCH_FIELDS = [
     "users_loaded",
 ]
 
+DEFAULT_ADVISORY_MATCH_FIELDS = [
+    "config_file",
+    "users_file",
+    "host_os",
+    "host_arch",
+]
+
 DEFAULT_METRIC_SPECS = {
     "final_tps": {
         "label": "Final TPS",
@@ -50,13 +57,73 @@ DEFAULT_METRIC_SPECS = {
         "warn_threshold_pct": 7.0,
         "fail_threshold_pct": 10.0,
     },
-    "peak_tps": {"label": "Peak TPS", "direction": "higher", "enabled": False},
-    "peak_bps_bytes_per_sec": {"label": "Peak BPS", "direction": "higher", "enabled": False},
-    "peak_cpu_pct": {"label": "Peak CPU", "direction": "lower", "enabled": False},
-    "avg_rss_mb": {"label": "Avg RSS", "direction": "lower", "enabled": False},
-    "peak_rss_mb": {"label": "Peak RSS", "direction": "lower", "enabled": False},
-    "avg_single_stream_bps": {"label": "Avg Single Stream", "direction": "higher", "enabled": False},
-    "max_single_stream_bps": {"label": "Max Single Stream", "direction": "higher", "enabled": False},
+    "success_rate_pct": {
+        "label": "Success Rate",
+        "direction": "higher",
+        "enabled": True,
+        "warn_threshold_pct": 0.5,
+        "fail_threshold_pct": 1.0,
+        "absolute_warn_min": 99.9,
+        "absolute_fail_min": 99.0,
+    },
+    "failed_requests": {
+        "label": "Failed Requests",
+        "direction": "lower",
+        "enabled": True,
+        "warn_threshold_pct": 10.0,
+        "fail_threshold_pct": 20.0,
+        "absolute_warn_max": 0.0,
+        "absolute_fail_max": 0.0,
+    },
+    "peak_tps": {
+        "label": "Peak TPS",
+        "direction": "higher",
+        "enabled": True,
+        "warn_threshold_pct": 5.0,
+        "fail_threshold_pct": 8.0,
+    },
+    "peak_bps_bytes_per_sec": {
+        "label": "Peak BPS",
+        "direction": "higher",
+        "enabled": True,
+        "warn_threshold_pct": 5.0,
+        "fail_threshold_pct": 8.0,
+    },
+    "peak_cpu_pct": {
+        "label": "Peak CPU",
+        "direction": "lower",
+        "enabled": True,
+        "warn_threshold_pct": 8.0,
+        "fail_threshold_pct": 12.0,
+    },
+    "avg_rss_mb": {
+        "label": "Avg RSS",
+        "direction": "lower",
+        "enabled": True,
+        "warn_threshold_pct": 8.0,
+        "fail_threshold_pct": 12.0,
+    },
+    "peak_rss_mb": {
+        "label": "Peak RSS",
+        "direction": "lower",
+        "enabled": True,
+        "warn_threshold_pct": 8.0,
+        "fail_threshold_pct": 12.0,
+    },
+    "avg_single_stream_bps": {
+        "label": "Avg Single Stream",
+        "direction": "higher",
+        "enabled": True,
+        "warn_threshold_pct": 4.0,
+        "fail_threshold_pct": 6.0,
+    },
+    "max_single_stream_bps": {
+        "label": "Max Single Stream",
+        "direction": "higher",
+        "enabled": True,
+        "warn_threshold_pct": 5.0,
+        "fail_threshold_pct": 8.0,
+    },
 }
 
 
@@ -178,16 +245,36 @@ def validate_comparable(baseline_row, candidate_row, required_fields=None):
     return mismatches
 
 
-def compare_archives(baseline_row, candidate_row, metric_specs=None, required_fields=None):
+def validate_advisory_fields(baseline_row, candidate_row, advisory_fields=None):
+    mismatches = []
+    fields = advisory_fields or DEFAULT_ADVISORY_MATCH_FIELDS
+    for field in fields:
+        baseline_value = clean_text(baseline_row.get(field))
+        candidate_value = clean_text(candidate_row.get(field))
+        if baseline_value and candidate_value and baseline_value != candidate_value:
+            mismatches.append(
+                {
+                    "field": field,
+                    "baseline_value": baseline_value,
+                    "candidate_value": candidate_value,
+                }
+            )
+    return mismatches
+
+
+def compare_archives(baseline_row, candidate_row, metric_specs=None, required_fields=None, advisory_fields=None):
     specs = metric_specs or DEFAULT_METRIC_SPECS
     mismatches = validate_comparable(baseline_row, candidate_row, required_fields)
+    advisory_mismatches = validate_advisory_fields(baseline_row, candidate_row, advisory_fields)
     rows = [compare_metric(metric_name, spec, baseline_row, candidate_row) for metric_name, spec in specs.items()]
     return {
         "baseline": baseline_row,
         "candidate": candidate_row,
         "mismatches": mismatches,
+        "advisory_mismatches": advisory_mismatches,
         "rows": rows,
         "required_match_fields": required_fields or DEFAULT_REQUIRED_MATCH_FIELDS,
+        "advisory_match_fields": advisory_fields or DEFAULT_ADVISORY_MATCH_FIELDS,
     }
 
 
@@ -278,6 +365,17 @@ def write_compare_md(compare_result, output_path, title):
                 )
             handle.write("\n")
 
+        if compare_result.get("advisory_mismatches"):
+            handle.write("## Advisory Field Differences\n\n")
+            handle.write("| Field | Baseline | Candidate |\n")
+            handle.write("| --- | --- | --- |\n")
+            for mismatch in compare_result["advisory_mismatches"]:
+                handle.write(
+                    f"| `{mismatch['field']}` | `{mismatch['baseline_value'] or 'N/A'}` | "
+                    f"`{mismatch['candidate_value'] or 'N/A'}` |\n"
+                )
+            handle.write("\n")
+
         handle.write("## Baseline\n\n")
         handle.write(render_meta_table(compare_result["baseline"]))
         handle.write("\n\n## Candidate\n\n")
@@ -319,7 +417,27 @@ def merge_metric_specs(policy):
     return merged
 
 
-def resolve_baseline_from_manifest(manifest_path, scenario_id):
+def _row_matches_manifest_fields(candidate_row, manifest_row):
+    checks = [
+        ("scenario_id", clean_text(manifest_row.get("scenario_id"))),
+        ("op", clean_text(manifest_row.get("op"))),
+        ("object_size_spec", clean_text(manifest_row.get("object_size_spec"))),
+        ("users_loaded", clean_text(manifest_row.get("users_loaded"))),
+    ]
+    manifest_threads = clean_text(manifest_row.get("threads"))
+    if manifest_threads:
+        checks.append(("total_threads", manifest_threads))
+
+    for field, expected in checks:
+        if not expected:
+            continue
+        actual = clean_text(candidate_row.get(field))
+        if actual != expected:
+            return False
+    return True
+
+
+def resolve_baseline_from_manifest(manifest_path, scenario_id=None, candidate_row=None):
     manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
     if not os.path.exists(manifest_path):
         raise FileNotFoundError(f"Baseline manifest not found: {manifest_path}")
@@ -331,19 +449,30 @@ def resolve_baseline_from_manifest(manifest_path, scenario_id):
         with open(manifest_path, "r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle))
 
+    matched_row = None
     for row in rows:
-        if clean_text(row.get("scenario_id")) != scenario_id:
-            continue
-        baseline_path = clean_text(row.get("baseline_archive_path"))
-        if baseline_path:
-            if not os.path.isabs(baseline_path):
-                baseline_path = os.path.abspath(os.path.join(manifest_dir, baseline_path))
-            return baseline_path, row
-        baseline_url = clean_text(row.get("baseline_archive_url"))
-        if baseline_url:
-            raise RuntimeError("Remote baseline URLs are not supported in v1. Use baseline_archive_path.")
+        if scenario_id and clean_text(row.get("scenario_id")) == scenario_id:
+            matched_row = row
+            break
+        if candidate_row and _row_matches_manifest_fields(candidate_row, row):
+            matched_row = row
+            break
 
-    raise KeyError(f"Scenario '{scenario_id}' not found in baseline manifest: {manifest_path}")
+    if matched_row is None:
+        if scenario_id:
+            raise KeyError(f"Scenario '{scenario_id}' not found in baseline manifest: {manifest_path}")
+        raise KeyError("No matching baseline entry found in baseline manifest for the candidate archive.")
+
+    row = matched_row
+    baseline_path = clean_text(row.get("baseline_archive_path"))
+    if baseline_path:
+        if not os.path.isabs(baseline_path):
+            baseline_path = os.path.abspath(os.path.join(manifest_dir, baseline_path))
+        return baseline_path, row
+    baseline_url = clean_text(row.get("baseline_archive_url"))
+    if baseline_url:
+        raise RuntimeError("Remote baseline URLs are not supported in v1. Use baseline_archive_path.")
+    raise KeyError("Baseline entry found, but no usable baseline_archive_path was provided.")
 
 
 def summarize_rows(rows, status_key):

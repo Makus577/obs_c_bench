@@ -319,6 +319,7 @@ class BenchmarkTester:
         baseline_path = os.path.join(fixtures_dir, "baseline_upload_1mb_128t.csv")
         better_path = os.path.join(fixtures_dir, "candidate_better_upload_1mb_128t.csv")
         worse_path = os.path.join(fixtures_dir, "candidate_worse_upload_1mb_128t.csv")
+        failures_path = os.path.join(fixtures_dir, "candidate_failures_upload_1mb_128t.csv")
         mismatch_path = os.path.join(fixtures_dir, "candidate_mismatch_upload_1mb_256t.csv")
 
         compare_dir = os.path.join(perf_root, "compare")
@@ -341,16 +342,31 @@ class BenchmarkTester:
         ret, output = self.run_cmd(
             f"python3 scripts/reporting/perf_gate.py --candidate {better_path} "
             f"--policy {policy_path} --baselines-manifest {manifest_path} "
-            f"--scenario-id upload_1mb_128t --output-dir {pass_dir}"
+            f"--output-dir {pass_dir}"
         )
         if ret != 0:
             print(output)
-            print("[FAIL] perf_gate.py should pass for improved candidate.")
+            print("[FAIL] perf_gate.py should pass for improved candidate via manifest auto-match.")
             return False
         with open(os.path.join(pass_dir, "gate_result.json"), "r", encoding="utf-8") as handle:
             pass_result = json.load(handle)
         if pass_result.get("overall_status") != "PASS":
             print("[FAIL] perf_gate.py pass case did not report PASS.")
+            return False
+
+        failure_dir = os.path.join(perf_root, "gate_failures")
+        ret, output = self.run_cmd(
+            f"python3 scripts/reporting/perf_gate.py --baseline {baseline_path} "
+            f"--candidate {failures_path} --policy {policy_path} --output-dir {failure_dir}"
+        )
+        if ret != 1:
+            print(output)
+            print("[FAIL] perf_gate.py should fail when candidate introduces failed requests.")
+            return False
+        with open(os.path.join(failure_dir, "gate_result.json"), "r", encoding="utf-8") as handle:
+            failure_result = json.load(handle)
+        if "failed_requests" not in failure_result.get("failed_metrics", []):
+            print("[FAIL] perf_gate.py did not flag failed_requests regression.")
             return False
 
         fail_dir = os.path.join(perf_root, "gate_fail")

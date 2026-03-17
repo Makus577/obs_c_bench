@@ -393,11 +393,27 @@ python3 scripts/reporting/perf_gate.py \
   --output-dir ./gate_out
 ```
 
+若候选 `archive.csv` 已包含 `scenario_id`，且 `ci/perf/baselines.csv` 中存在对应记录，则脚本也支持不显式传 `--scenario-id`，直接按清单自动匹配基线。
+
 脚本会输出：
 
 * `compare.csv`
 * `compare.md`
 * `gate_result.json`
+
+默认门禁除 `final_tps`、`final_bps_bytes_per_sec`、`avg_latency_ms`、`p99_latency_ms`、`avg_cpu_pct` 外，还会覆盖：
+
+* `success_rate_pct`
+* `failed_requests`
+* `peak_tps`
+* `peak_bps_bytes_per_sec`
+* `peak_cpu_pct`
+* `avg_rss_mb`
+* `peak_rss_mb`
+* `avg_single_stream_bps`
+* `max_single_stream_bps`
+
+其中 `config_file`、`users_file`、`host_os`、`host_arch` 会作为 advisory 字段输出差异，帮助识别“环境不完全一致但仍可比较”的情况。
 
 退出码约定：
 

@@ -5,6 +5,12 @@
     "object_size_spec",
     "users_loaded"
   ],
+  "advisory_match_fields": [
+    "config_file",
+    "users_file",
+    "host_os",
+    "host_arch"
+  ],
   "metrics": {
     "final_tps": {
       "label": "Final TPS",
@@ -41,40 +47,72 @@
       "warn_threshold_pct": 7.0,
       "fail_threshold_pct": 10.0
     },
+    "success_rate_pct": {
+      "label": "Success Rate",
+      "direction": "higher",
+      "enabled": true,
+      "warn_threshold_pct": 0.5,
+      "fail_threshold_pct": 1.0,
+      "absolute_warn_min": 99.9,
+      "absolute_fail_min": 99.0
+    },
+    "failed_requests": {
+      "label": "Failed Requests",
+      "direction": "lower",
+      "enabled": true,
+      "warn_threshold_pct": 10.0,
+      "fail_threshold_pct": 20.0,
+      "absolute_warn_max": 0.0,
+      "absolute_fail_max": 0.0
+    },
     "peak_tps": {
       "label": "Peak TPS",
       "direction": "higher",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 5.0,
+      "fail_threshold_pct": 8.0
     },
     "peak_bps_bytes_per_sec": {
       "label": "Peak BPS",
       "direction": "higher",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 5.0,
+      "fail_threshold_pct": 8.0
     },
     "peak_cpu_pct": {
       "label": "Peak CPU",
       "direction": "lower",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 8.0,
+      "fail_threshold_pct": 12.0
     },
     "avg_rss_mb": {
       "label": "Avg RSS",
       "direction": "lower",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 8.0,
+      "fail_threshold_pct": 12.0
     },
     "peak_rss_mb": {
       "label": "Peak RSS",
       "direction": "lower",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 8.0,
+      "fail_threshold_pct": 12.0
     },
     "avg_single_stream_bps": {
       "label": "Avg Single Stream",
       "direction": "higher",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 4.0,
+      "fail_threshold_pct": 6.0
     },
     "max_single_stream_bps": {
       "label": "Max Single Stream",
       "direction": "higher",
-      "enabled": false
+      "enabled": true,
+      "warn_threshold_pct": 5.0,
+      "fail_threshold_pct": 8.0
     }
   }
 }

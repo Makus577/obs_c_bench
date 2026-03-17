@@ -37,18 +37,27 @@ def evaluate_gate(compare_result, metric_specs):
             rows.append(gate_row)
             continue
 
-        if row["status"] == "SKIP":
+        candidate_value = row["candidate_value"]
+        diff_pct = row["relative_diff_pct"]
+        direction = spec.get("direction", row["direction"])
+        warn_threshold = float(spec.get("warn_threshold_pct", 0.0))
+        fail_threshold = float(spec.get("fail_threshold_pct", 0.0))
+        absolute_warn_min = spec.get("absolute_warn_min")
+        absolute_fail_min = spec.get("absolute_fail_min")
+        absolute_warn_max = spec.get("absolute_warn_max")
+        absolute_fail_max = spec.get("absolute_fail_max")
+        has_absolute_guard = any(
+            value is not None
+            for value in (absolute_warn_min, absolute_fail_min, absolute_warn_max, absolute_fail_max)
+        )
+
+        if row["status"] == "SKIP" and not has_absolute_guard:
             gate_row["gate_status"] = "SKIP"
             skipped_metrics.append(metric_name)
             rows.append(gate_row)
             continue
 
-        diff_pct = row["relative_diff_pct"]
-        direction = spec.get("direction", row["direction"])
-        warn_threshold = float(spec.get("warn_threshold_pct", 0.0))
-        fail_threshold = float(spec.get("fail_threshold_pct", 0.0))
-
-        if diff_pct is None:
+        if diff_pct is None and not has_absolute_guard:
             gate_row["gate_status"] = "SKIP"
             gate_row["reason"] = row["reason"] or "Percentage diff unavailable."
             skipped_metrics.append(metric_name)
@@ -56,21 +65,42 @@ def evaluate_gate(compare_result, metric_specs):
             continue
 
         regression_pct = 0.0
-        if direction == "higher":
+        if diff_pct is not None and direction == "higher":
             if diff_pct < 0:
                 regression_pct = -diff_pct
-        else:
+        elif diff_pct is not None:
             if diff_pct > 0:
                 regression_pct = diff_pct
 
-        if regression_pct >= fail_threshold:
+        gate_status = "PASS"
+        gate_reason = ""
+
+        if absolute_fail_min is not None and candidate_value is not None and candidate_value < float(absolute_fail_min):
+            gate_status = "FAIL"
+            gate_reason = f"Candidate value {candidate_value:.4f} is below absolute fail minimum {float(absolute_fail_min):.4f}."
+        elif absolute_fail_max is not None and candidate_value is not None and candidate_value > float(absolute_fail_max):
+            gate_status = "FAIL"
+            gate_reason = f"Candidate value {candidate_value:.4f} is above absolute fail maximum {float(absolute_fail_max):.4f}."
+        elif diff_pct is not None and regression_pct >= fail_threshold:
+            gate_status = "FAIL"
+        elif absolute_warn_min is not None and candidate_value is not None and candidate_value < float(absolute_warn_min):
+            gate_status = "WARN"
+            gate_reason = f"Candidate value {candidate_value:.4f} is below absolute warn minimum {float(absolute_warn_min):.4f}."
+        elif absolute_warn_max is not None and candidate_value is not None and candidate_value > float(absolute_warn_max):
+            gate_status = "WARN"
+            gate_reason = f"Candidate value {candidate_value:.4f} is above absolute warn maximum {float(absolute_warn_max):.4f}."
+        elif diff_pct is not None and regression_pct >= warn_threshold:
+            gate_status = "WARN"
+
+        gate_row["gate_status"] = gate_status
+        if gate_reason:
+            gate_row["reason"] = gate_reason
+
+        if gate_status == "FAIL":
             gate_row["gate_status"] = "FAIL"
             failed_metrics.append(metric_name)
-        elif regression_pct >= warn_threshold:
-            gate_row["gate_status"] = "WARN"
+        elif gate_status == "WARN":
             warned_metrics.append(metric_name)
-        else:
-            gate_row["gate_status"] = "PASS"
 
         rows.append(gate_row)
 
@@ -101,10 +131,14 @@ def main():
         if args.baseline:
             baseline_path = args.baseline
             baseline_ref = None
-        elif args.baselines_manifest and scenario_id:
-            baseline_path, baseline_ref = resolve_baseline_from_manifest(args.baselines_manifest, scenario_id)
+        elif args.baselines_manifest:
+            baseline_path, baseline_ref = resolve_baseline_from_manifest(
+                args.baselines_manifest,
+                scenario_id=scenario_id,
+                candidate_row=candidate_row,
+            )
         else:
-            raise ValueError("Either --baseline or (--baselines-manifest and --scenario-id) must be provided.")
+            raise ValueError("Either --baseline or --baselines-manifest must be provided.")
 
         baseline_row = load_archive_row(baseline_path)
         policy = load_policy_file(args.policy)
@@ -114,6 +148,7 @@ def main():
             candidate_row,
             metric_specs=metric_specs,
             required_fields=policy.get("required_match_fields"),
+            advisory_fields=policy.get("advisory_match_fields"),
         )
 
         output_dir = resolve_output_dir(args.output_dir, args.candidate)
@@ -128,6 +163,7 @@ def main():
                 "candidate": candidate_row,
                 "baseline_ref": baseline_ref,
                 "mismatches": compare_result["mismatches"],
+                "advisory_mismatches": compare_result.get("advisory_mismatches", []),
                 "rows": compare_result["rows"],
             }
         else:
@@ -143,6 +179,7 @@ def main():
                 "failed_metrics": evaluation["failed_metrics"],
                 "warned_metrics": evaluation["warned_metrics"],
                 "skipped_metrics": evaluation["skipped_metrics"],
+                "advisory_mismatches": compare_result.get("advisory_mismatches", []),
                 "rows": evaluation["rows"],
             }
 
@@ -160,6 +197,13 @@ def main():
         print(f"[+] compare.csv -> {compare_csv}")
         print(f"[+] compare.md  -> {compare_md}")
         print(f"[+] gate_result -> {gate_json}")
+        if gate_result.get("advisory_mismatches"):
+            print("[*] Advisory differences detected:")
+            for mismatch in gate_result["advisory_mismatches"]:
+                print(
+                    f"    {mismatch['field']}: baseline={mismatch['baseline_value'] or 'N/A'} "
+                    f"candidate={mismatch['candidate_value'] or 'N/A'}"
+                )
 
         if gate_result["exit_code"] == 2:
             print("[-] Performance gate skipped: archives are not comparable.")
