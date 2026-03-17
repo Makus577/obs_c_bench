@@ -51,6 +51,9 @@ static int infer_http_code(obs_status status) {
 
 void *worker_routine(void *arg) {
     WorkerArgs *args = (WorkerArgs *)arg;
+    struct timespec ts_worker_start, ts_worker_end;
+    clock_gettime(CLOCK_MONOTONIC, &ts_worker_start);
+    args->worker_start_time_s = ts_worker_start.tv_sec + ts_worker_start.tv_nsec / 1000000000.0;
     
     args->pattern_size = PATTERN_BUF_SIZE;
     args->pattern_mask = PATTERN_BUF_SIZE - 1;
@@ -60,7 +63,10 @@ void *worker_routine(void *arg) {
         fill_pattern_buffer(args->pattern_buffer, args->pattern_size, 0);
         args->data_buffer = args->pattern_buffer;
     } else {
+        struct timespec ts_worker_fail;
         LOG_ERROR("Thread %d failed to allocate pattern buffer", args->thread_id);
+        clock_gettime(CLOCK_MONOTONIC, &ts_worker_fail);
+        args->worker_end_time_s = ts_worker_fail.tv_sec + ts_worker_fail.tv_nsec / 1000000000.0;
         return NULL;
     }
 
@@ -83,7 +89,7 @@ void *worker_routine(void *arg) {
 
     if (args->config->enable_detail_log) {
         snprintf(detail_filename, sizeof(detail_filename), "%s/detail_%d_part%d.csv", 
-                 args->config->task_log_dir, args->thread_id, file_part_idx);
+                 args->config->log_task_dir, args->thread_id, file_part_idx);
         detail_fp = fopen(detail_filename, "w");
         if (detail_fp) {
             fprintf(detail_fp, "Timestamp(s),OpType,Key,Latency(ms),SDKStatus,HTTPCode,Bytes,RequestID\n");
@@ -96,7 +102,7 @@ void *worker_routine(void *arg) {
     
     while (!g_graceful_stop) {
         struct timespec ts_now;
-        clock_gettime(CLOCK_MONOTONIC_COARSE, &ts_now);
+        clock_gettime(CLOCK_MONOTONIC, &ts_now);
         double now_ms = ts_now.tv_sec * 1000.0 + ts_now.tv_nsec / 1000000.0;
         
         if (now_ms >= args->stop_timestamp_ms) break;
@@ -210,7 +216,7 @@ void *worker_routine(void *arg) {
                     fclose(detail_fp);
                     file_part_idx++;
                     total_written_rows = 0;
-                    snprintf(detail_filename, sizeof(detail_filename), "%s/detail_%d_part%d.csv", args->config->task_log_dir, args->thread_id, file_part_idx);
+                    snprintf(detail_filename, sizeof(detail_filename), "%s/detail_%d_part%d.csv", args->config->log_task_dir, args->thread_id, file_part_idx);
                     detail_fp = fopen(detail_filename, "w");
                     if (detail_fp) fprintf(detail_fp, "Timestamp(s),OpType,Key,Latency(ms),SDKStatus,HTTPCode,Bytes,RequestID\n");
                 }
@@ -219,6 +225,15 @@ void *worker_routine(void *arg) {
 
         if (status == OBS_STATUS_OK) {
             args->stats.success_count++;
+            args->stats.total_latency_ms += latency_ms;
+            args->stats.latency_sample_count++;
+            if (args->stats.latency_sample_count == 1 || latency_ms < args->stats.min_latency_ms) {
+                args->stats.min_latency_ms = latency_ms;
+            }
+            if (latency_ms > args->stats.max_latency_ms) {
+                args->stats.max_latency_ms = latency_ms;
+            }
+            args->stats.latency_hist[latency_histogram_bucket(latency_ms)]++;
         } else {
             if (args->stats.fail_validation_count == prev_val_count) {
                 if (current_http_code == 403) args->stats.fail_403_count++;
@@ -246,6 +261,7 @@ void *worker_routine(void *arg) {
     }
     if (batch_buffer) free(batch_buffer);
     if (args->pattern_buffer) free(args->pattern_buffer);
+    clock_gettime(CLOCK_MONOTONIC, &ts_worker_end);
+    args->worker_end_time_s = ts_worker_end.tv_sec + ts_worker_end.tv_nsec / 1000000000.0;
     return NULL;
 }
-

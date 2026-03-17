@@ -1,6 +1,47 @@
 #include "bench.h"
 #include <strings.h>
 #include <ctype.h>
+#include <errno.h>
+
+static long long parse_size_token(const char *text, int *ok) {
+    char *end = NULL;
+    long long value;
+    char unit_buf[8] = {0};
+    size_t i = 0;
+
+    errno = 0;
+    value = strtoll(text, &end, 10);
+    if (errno != 0 || end == text || value < 0) {
+        *ok = 0;
+        return 0;
+    }
+
+    while (*end && isspace((unsigned char)*end)) {
+        end++;
+    }
+
+    while (*end && i < sizeof(unit_buf) - 1) {
+        unit_buf[i++] = (char)toupper((unsigned char)*end);
+        end++;
+    }
+    while (*end && isspace((unsigned char)*end)) {
+        end++;
+    }
+    if (*end != '\0') {
+        *ok = 0;
+        return 0;
+    }
+
+    *ok = 1;
+    if (unit_buf[0] == '\0' || strcmp(unit_buf, "B") == 0) return value;
+    if (strcmp(unit_buf, "KB") == 0) return value * 1000LL;
+    if (strcmp(unit_buf, "MB") == 0) return value * 1000LL * 1000LL;
+    if (strcmp(unit_buf, "GB") == 0) return value * 1000LL * 1000LL * 1000LL;
+    if (strcmp(unit_buf, "TB") == 0) return value * 1000LL * 1000LL * 1000LL * 1000LL;
+
+    *ok = 0;
+    return 0;
+}
 
 static char* trim_both(char *s) {
     if (!s) return NULL;
@@ -37,6 +78,117 @@ static int parse_mix_ops(const char *val, int *ops, int max_ops) {
     }
     free(temp);
     return count;
+}
+
+int parse_object_size_spec(const char *spec, Config *cfg, char *errbuf, size_t errbuf_size) {
+    char temp[128];
+    char spec_copy[128];
+    char *range_sep = NULL;
+    int ok = 0;
+    long long min_size = 0;
+    long long max_size = 0;
+
+    if (!spec || !cfg) {
+        if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "ObjectSize spec is missing");
+        return -1;
+    }
+
+    snprintf(temp, sizeof(temp), "%s", spec);
+    snprintf(spec_copy, sizeof(spec_copy), "%s", spec);
+    range_sep = strchr(temp, '~');
+
+    if (range_sep) {
+        *range_sep = '\0';
+        min_size = parse_size_token(trim_both(temp), &ok);
+        if (!ok) {
+            if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "Invalid ObjectSize lower bound: %s", spec);
+            return -1;
+        }
+        max_size = parse_size_token(trim_both(range_sep + 1), &ok);
+        if (!ok) {
+            if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "Invalid ObjectSize upper bound: %s", spec);
+            return -1;
+        }
+        if (min_size > max_size) {
+            if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "Invalid ObjectSize range: %s", spec);
+            return -1;
+        }
+        cfg->object_size_min = min_size;
+        cfg->object_size_max = max_size;
+        cfg->is_dynamic_size = 1;
+        cfg->object_size = max_size;
+    } else {
+        max_size = parse_size_token(trim_both(temp), &ok);
+        if (!ok) {
+            if (errbuf && errbuf_size > 0) snprintf(errbuf, errbuf_size, "Invalid ObjectSize value: %s", spec);
+            return -1;
+        }
+        cfg->object_size_min = max_size;
+        cfg->object_size_max = max_size;
+        cfg->is_dynamic_size = 0;
+        cfg->object_size = max_size;
+    }
+
+    snprintf(cfg->object_size_spec, sizeof(cfg->object_size_spec), "%s", trim_both(spec_copy));
+    return 0;
+}
+
+int parse_test_case_arg(const char *value, int *out_test_case) {
+    if (!value || !out_test_case) return -1;
+
+    if (isdigit((unsigned char)value[0])) {
+        int test_case = atoi(value);
+        switch (test_case) {
+            case TEST_CASE_PUT:
+            case TEST_CASE_GET:
+            case TEST_CASE_DELETE:
+            case TEST_CASE_MULTIPART:
+            case TEST_CASE_RESUMABLE:
+            case TEST_CASE_MIX:
+                *out_test_case = test_case;
+                return 0;
+            default:
+                return -1;
+        }
+    }
+
+    if (strcasecmp(value, "upload") == 0 || strcasecmp(value, "put") == 0) {
+        *out_test_case = TEST_CASE_PUT;
+        return 0;
+    }
+    if (strcasecmp(value, "download") == 0 || strcasecmp(value, "get") == 0) {
+        *out_test_case = TEST_CASE_GET;
+        return 0;
+    }
+    if (strcasecmp(value, "delete") == 0 || strcasecmp(value, "del") == 0) {
+        *out_test_case = TEST_CASE_DELETE;
+        return 0;
+    }
+    if (strcasecmp(value, "multipart") == 0 || strcasecmp(value, "mpu") == 0) {
+        *out_test_case = TEST_CASE_MULTIPART;
+        return 0;
+    }
+    if (strcasecmp(value, "resumable") == 0 || strcasecmp(value, "uploadfile") == 0) {
+        *out_test_case = TEST_CASE_RESUMABLE;
+        return 0;
+    }
+    if (strcasecmp(value, "mix") == 0) {
+        *out_test_case = TEST_CASE_MIX;
+        return 0;
+    }
+    return -1;
+}
+
+const char *test_case_to_name(int test_case) {
+    switch (test_case) {
+        case TEST_CASE_PUT: return "upload";
+        case TEST_CASE_GET: return "download";
+        case TEST_CASE_DELETE: return "delete";
+        case TEST_CASE_MULTIPART: return "multipart";
+        case TEST_CASE_RESUMABLE: return "resumable";
+        case TEST_CASE_MIX: return "mix";
+        default: return "unknown";
+    }
 }
 
 int load_users_file(const char *filename, Config *cfg, int is_temp_mode) {
@@ -127,9 +279,13 @@ int load_config(const char *filename, Config *cfg) {
     
     cfg->enable_data_validation = 0;
     cfg->enable_detail_log = 0;
+    cfg->config_file_path[0] = '\0';
+    cfg->users_file_path[0] = '\0';
     
     cfg->object_size_min = cfg->object_size_max = 1024;
     cfg->is_dynamic_size = 0;
+    cfg->object_size = 1024;
+    snprintf(cfg->object_size_spec, sizeof(cfg->object_size_spec), "1024");
     
     cfg->range_count = 0;
     for(int i=0; i<MAX_RANGE_OPTIONS; i++) cfg->range_options[i] = NULL;
@@ -182,21 +338,10 @@ int load_config(const char *filename, Config *cfg) {
         else if (strcmp(key, "TestCase") == 0) cfg->test_case = atoi(val);
         
         else if (strcmp(key, "ObjectSize") == 0) {
-            char *tilde = strchr(val, '~');
-            if (tilde) {
-                *tilde = '\0';
-                cfg->object_size_min = atoll(val);
-                cfg->object_size_max = atoll(tilde + 1);
-                if (cfg->object_size_min > cfg->object_size_max) {
-                    printf("[Config Error] Invalid ObjectSize range.\n");
-                    fclose(fp); return -1;
-                }
-                cfg->is_dynamic_size = 1;
-                cfg->object_size = cfg->object_size_max; 
-            } else {
-                cfg->object_size_min = cfg->object_size_max = atoll(val);
-                cfg->is_dynamic_size = 0;
-                cfg->object_size = cfg->object_size_max;
+            char errbuf[128] = {0};
+            if (parse_object_size_spec(val, cfg, errbuf, sizeof(errbuf)) != 0) {
+                printf("[Config Error] %s\n", errbuf);
+                fclose(fp); return -1;
             }
         }
         else if (strcmp(key, "Range") == 0) {
@@ -295,6 +440,6 @@ int load_config(const char *filename, Config *cfg) {
     }
 
     fclose(fp);
+    snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", filename);
     return 0;
 }
-

@@ -3,6 +3,7 @@
 #include <strings.h> 
 #include <libgen.h>  
 #include <string.h> 
+#include <sys/stat.h>
 
 typedef struct {
     WorkerArgs *args;           
@@ -20,6 +21,12 @@ typedef struct {
     char request_id[64];
     uint64_t last_reported_bytes; 
 } transfer_context;
+
+static long long get_local_file_size(const char *filepath) {
+    struct stat st;
+    if (!filepath || stat(filepath, &st) != 0) return 0;
+    return (long long)st.st_size;
+}
 
 obs_status response_properties_callback(const obs_response_properties *properties, void *callback_data) {
     transfer_context *ctx = (transfer_context *)callback_data;
@@ -66,7 +73,7 @@ int put_buffer_callback_optimized(int buffer_size, char *buffer, void *callback_
         memcpy(buffer + bytes_copied, args->pattern_buffer + offset, to_copy);
         
         // 实时累加成功处理的字节数，确保即便大请求未结束也能看到带宽
-        args->stats.total_success_bytes += to_copy;
+        args->stats.streamed_bytes += to_copy;
 
         bytes_copied += to_copy;
         ctx->total_processed += to_copy;
@@ -83,7 +90,7 @@ obs_status get_buffer_callback_optimized(int buffer_size, const char *buffer, vo
 
     if (!args->config->enable_data_validation || ctx->skip_validation) {
         ctx->total_processed += buffer_size;
-        args->stats.total_success_bytes += buffer_size; // 实时累加
+        args->stats.streamed_bytes += buffer_size;
         return OBS_STATUS_OK;
     }
     
@@ -109,7 +116,7 @@ obs_status get_buffer_callback_optimized(int buffer_size, const char *buffer, vo
         }
         
         // 验证成功后实时累加
-        args->stats.total_success_bytes += to_check;
+        args->stats.streamed_bytes += to_check;
 
         bytes_checked += to_check;
         ctx->total_processed += to_check;
@@ -127,7 +134,7 @@ void resumable_progress_callback(double progress, uint64_t uploadedSize, uint64_
     if (ctx && ctx->args) {
         if (uploadedSize > ctx->last_reported_bytes) {
             uint64_t increment = uploadedSize - ctx->last_reported_bytes;
-            ctx->args->stats.total_success_bytes += increment;
+            ctx->args->stats.streamed_bytes += increment;
             ctx->last_reported_bytes = uploadedSize;
         }
     }
@@ -262,6 +269,10 @@ obs_status run_put_benchmark(WorkerArgs *args, char *key, long long object_size,
     if (out_req_id && strlen(ctx.request_id) > 0) {
         strcpy(out_req_id, ctx.request_id);
     }
+
+    if (ctx.ret_status == OBS_STATUS_OK) {
+        args->stats.completed_success_bytes += object_size;
+    }
     
     return ctx.ret_status;
 }
@@ -347,7 +358,7 @@ obs_status run_get_benchmark(WorkerArgs *args, char *key, char *range_str, char 
     }
 
     if (ctx.ret_status == OBS_STATUS_OK) {
-        args->stats.total_success_bytes += ctx.total_processed;
+        args->stats.completed_success_bytes += ctx.total_processed;
     }
 
     return ctx.ret_status;
@@ -473,6 +484,10 @@ obs_status run_multipart_benchmark(WorkerArgs *args, char *key, char *out_req_id
     }
     free(complete_infos);
 
+    if (ctx.ret_status == OBS_STATUS_OK) {
+        args->stats.completed_success_bytes += (long long)part_count * part_size;
+    }
+
     return ctx.ret_status;
 }
 
@@ -526,7 +541,10 @@ obs_status run_upload_file_benchmark(WorkerArgs *args, char *key, char *out_req_
     if (out_req_id && strlen(ctx.request_id) > 0) {
         strcpy(out_req_id, ctx.request_id);
     }
+
+    if (ctx.ret_status == OBS_STATUS_OK) {
+        args->stats.completed_success_bytes += get_local_file_size(args->config->upload_file_path);
+    }
     
     return ctx.ret_status;
 }
-

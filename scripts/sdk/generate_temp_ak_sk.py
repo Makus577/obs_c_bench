@@ -1,6 +1,7 @@
 import sys
 import requests
 import json
+import os
 from datetime import datetime
 
 # Huawei Cloud IAM Configuration
@@ -9,8 +10,9 @@ TOKEN_PATH = "/v3/auth/tokens"
 STS_PATH = "/v3.0/OS-CREDENTIAL/securitytokens"
 
 # File Configuration
-INPUT_FILE = 'users.dat'
-OUTPUT_FILE = 'temptoken.dat'
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+INPUT_FILE = os.path.join(BASE_DIR, 'users.dat')
+OUTPUT_FILE = os.path.join(BASE_DIR, 'temptoken.dat')
 
 def get_temporary_credentials(user_id, user_name, password):
     """

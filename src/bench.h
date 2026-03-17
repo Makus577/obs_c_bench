@@ -9,6 +9,7 @@
 #include <sys/time.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <limits.h>
 #include "log.h" 
 
 #ifdef MOCK_SDK_MODE
@@ -35,6 +36,7 @@ extern volatile sig_atomic_t g_graceful_stop;
 
 #define MAX_MIX_OPS 32 
 #define MAX_RANGE_OPTIONS 64 
+#define LATENCY_HIST_BUCKETS 371
 
 // 批量落盘大小
 #define BATCH_SIZE 1000
@@ -125,7 +127,11 @@ typedef struct {
     int enable_data_validation;
     int enable_detail_log;      
     int resumable_task_num;     
-    char task_log_dir[256];     
+    char report_task_dir[PATH_MAX];
+    char log_task_dir[PATH_MAX];
+    char config_file_path[PATH_MAX];
+    char users_file_path[PATH_MAX];
+    char object_size_spec[64];
 
 } Config;
 
@@ -138,10 +144,13 @@ typedef struct {
     long long fail_5xx_count;   
     long long fail_other_count; 
     long long fail_validation_count; 
-    long long total_success_bytes; 
+    long long streamed_bytes;
+    long long completed_success_bytes;
     double total_latency_ms;
     double max_latency_ms;
     double min_latency_ms;
+    long long latency_sample_count;
+    unsigned long long latency_hist[LATENCY_HIST_BUCKETS];
 } ThreadStats;
 
 typedef struct {
@@ -159,20 +168,66 @@ typedef struct {
     
     char *pattern_buffer;       
     long long pattern_size;     
-    long long pattern_mask;     
+    long long pattern_mask;
+    double worker_start_time_s;
+    double worker_end_time_s;
 } WorkerArgs;
+
+typedef struct {
+    long long total_requests;
+    long long success_requests;
+    long long failed_requests;
+    long long fail_403;
+    long long fail_404;
+    long long fail_409;
+    long long fail_4xx_other;
+    long long fail_5xx;
+    long long fail_other;
+    long long fail_validation;
+    double actual_duration_s;
+    double success_rate_pct;
+    double final_tps;
+    double peak_tps;
+    double final_bps;
+    double peak_bps;
+    double avg_latency_ms;
+    double p99_latency_ms;
+    double avg_single_stream_bps;
+    double max_single_stream_bps;
+    double avg_cpu_pct;
+    double peak_cpu_pct;
+    double avg_rss_mb;
+    double peak_rss_mb;
+} BenchmarkSummary;
+
+static inline int latency_histogram_bucket(double latency_ms) {
+    if (latency_ms <= 0.0) return 0;
+    if (latency_ms < 10.0) return (int)(latency_ms * 10.0);
+    if (latency_ms < 100.0) return 100 + (int)(latency_ms - 10.0);
+    if (latency_ms < 1000.0) return 190 + (int)((latency_ms - 100.0) / 10.0);
+    if (latency_ms < 10000.0) return 280 + (int)((latency_ms - 1000.0) / 100.0);
+    return LATENCY_HIST_BUCKETS - 1;
+}
+
+static inline double latency_bucket_upper_bound_ms(int bucket) {
+    if (bucket < 0) return 0.0;
+    if (bucket < 100) return (bucket + 1) / 10.0;
+    if (bucket < 190) return 10.0 + (bucket - 100 + 1);
+    if (bucket < 280) return 100.0 + (bucket - 190 + 1) * 10.0;
+    if (bucket < LATENCY_HIST_BUCKETS - 1) return 1000.0 + (bucket - 280 + 1) * 100.0;
+    return 10000.0;
+}
 
 // 函数声明
 int load_config(const char *filename, Config *cfg);
 int load_users_file(const char *filename, Config *cfg, int is_temp_mode); 
+int parse_object_size_spec(const char *spec, Config *cfg, char *errbuf, size_t errbuf_size);
+int parse_test_case_arg(const char *value, int *out_test_case);
+const char *test_case_to_name(int test_case);
 void *worker_routine(void *arg);
 void fill_pattern_buffer(char *buf, size_t size, int seed);
 
-void save_benchmark_report(Config *cfg, long long total, 
-                           long long success, long long fail, 
-                           long long f403, long long f404, long long f409, long long f4other,
-                           long long f5xx, long long fother, long long fvalidate,
-                           double tps, double throughput);
+void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary);
 
 obs_status run_put_benchmark(WorkerArgs *args, char *key, long long object_size, char *out_req_id);
 obs_status run_get_benchmark(WorkerArgs *args, char *key, char *range_str, char *out_req_id);
@@ -182,4 +237,3 @@ obs_status run_multipart_benchmark(WorkerArgs *args, char *key, char *out_req_id
 obs_status run_upload_file_benchmark(WorkerArgs *args, char *key, char *out_req_id);
 
 #endif
-
