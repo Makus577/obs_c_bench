@@ -3,7 +3,8 @@
 import sys
 import os
 
-OUTPUT_FILE = "test_data.bin"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+OUTPUT_FILE = os.path.join(BASE_DIR, "test_data.bin")
 FILE_SIZE_MB = 10 
 PATTERN_SIZE = 1024 * 1024 
 

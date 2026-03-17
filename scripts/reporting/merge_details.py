@@ -5,9 +5,11 @@ import os
 import glob
 import pandas as pd
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def merge_latest_task_logs():
     # Automatically find the latest task directory
-    task_dirs = sorted(glob.glob("logs/task_*"))
+    task_dirs = sorted(glob.glob(os.path.join(BASE_DIR, "logs/task_*")))
     if not task_dirs:
         print("[-] No benchmark task log directories found.")
         return

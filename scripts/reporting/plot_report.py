@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def generate_dashboard(csv_path):
     print(f"[+] Loading data: {csv_path} ...")
     try:
@@ -138,7 +140,7 @@ def generate_dashboard(csv_path):
     print(f"[+] Dashboard generated successfully: {output_img}")
 
 def main():
-    task_dirs = sorted(glob.glob("logs/task_*"))
+    task_dirs = sorted(glob.glob(os.path.join(BASE_DIR, "logs/task_*")))
     if not task_dirs:
         print("[-] No logs/task_* directories found.")
         return
@@ -148,11 +150,10 @@ def main():
     
     if not os.path.exists(csv_path):
         print(f"[-] detail.csv not found in {latest_dir}.")
-        print("    Please run merge_details.py first.")
+        print("    Please run scripts/reporting/merge_details.py first.")
         return
         
     generate_dashboard(csv_path)
 
 if __name__ == "__main__":
     main()
-

@@ -4,7 +4,7 @@
 """
 OBS C-Bench Functional E2E Test Script (Pytest version)
 =======================================================
-Run this file directly: python3 functional_test.py
+Run this file directly: python3 scripts/tests/functional_test.py
 It will automatically invoke pytest and save results to report.html.
 """
 
@@ -13,6 +13,7 @@ import sys
 import shutil
 import subprocess
 import re
+import platform
 
 # ==========================================
 # 1. Dependency Check (Try-Catch)
@@ -54,7 +55,7 @@ if __name__ == "__main__":
 # ==========================================
 # 3. Global Test Configuration & Utilities
 # ==========================================
-WORK_DIR = os.path.dirname(os.path.abspath(__file__))
+WORK_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if not WORK_DIR:
     WORK_DIR = os.getcwd()
 
@@ -62,15 +63,22 @@ CONFIG_FILE = os.path.join(WORK_DIR, 'config.dat')
 CONFIG_BAK = os.path.join(WORK_DIR, 'config.dat.bak')
 USERS_FILE = os.path.join(WORK_DIR, 'users.dat')
 USERS_BAK = os.path.join(WORK_DIR, 'users.dat.bak')
-LIB_DIR = os.path.join(WORK_DIR, 'lib')
+SDK_ROOT = os.environ.get(
+    "OBS_SDK_ROOT",
+    os.path.join(WORK_DIR, ".deps", "obs_sdk", f"{platform.system().lower()}-{platform.machine().lower()}"),
+)
+LIB_DIR = os.path.join(SDK_ROOT, 'lib')
 BINARY = os.path.join(WORK_DIR, 'obs_c_bench')
+HAS_REAL_SDK = os.path.exists(os.path.join(SDK_ROOT, 'include', 'eSDKOBS.h'))
 
 def run_cmd(cmd):
     env = os.environ.copy()
-    if 'LD_LIBRARY_PATH' in env:
-        env['LD_LIBRARY_PATH'] = f"{LIB_DIR}:{env['LD_LIBRARY_PATH']}"
-    else:
-        env['LD_LIBRARY_PATH'] = LIB_DIR
+    env['OBS_SDK_ROOT'] = SDK_ROOT
+    if HAS_REAL_SDK:
+        if 'LD_LIBRARY_PATH' in env:
+            env['LD_LIBRARY_PATH'] = f"{LIB_DIR}:{env['LD_LIBRARY_PATH']}"
+        else:
+            env['LD_LIBRARY_PATH'] = LIB_DIR
         
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, env=env, cwd=WORK_DIR)
     return result.returncode, result.stdout + result.stderr
@@ -119,6 +127,9 @@ def check_obs_output(output, expect_success=True, expected_string=None):
 
 @pytest.fixture(scope="session", autouse=True)
 def prepare_environment():
+    if not HAS_REAL_SDK:
+        pytest.skip(f"Real OBS SDK not found under {SDK_ROOT}; skipping functional E2E tests.")
+
     print("\n[Setup] Running make clean && make all...")
     ret, out = run_cmd("make clean && make all")
     if ret != 0 or not os.path.exists(BINARY):

@@ -2,15 +2,15 @@
 description: 自动化下载/解析最新的华为云 OBS C SDK 并重新编译本工具。
 ---
 
-本项目提供了一个自动化脚本 `update_sdk.py`，用于更新依赖的 SDK 并重新构建工具。
+本项目提供了一个自动化脚本 `scripts/sdk/update_sdk.py`，用于下载并构建依赖的 SDK 到本地缓存目录。
 
 // turbo
 1. 执行更新脚本：
 ```bash
-python3 update_sdk.py
+python3 scripts/sdk/update_sdk.py
 ```
 
 ### 说明
-- **架构自动识别**：脚本会自动检测当前系统是 x86_64 还是 aarch64，并调用相应的构建脚本（`build.sh` 或 `build_aarch.sh`）。
-- **优先使用本地包**：如果项目根目录下已经存在 `master.zip`，脚本将跳过下载直接使用该压缩包。
-- **自动构建**：脚本会自动解压 SDK、执行构建、替换 `lib` 目录下的动态库，并最终执行 `make all` 重新编译项目。
+- **架构自动识别**：脚本会自动检测当前系统是 x86_64 还是 aarch64，并调用相应的上游构建脚本。
+- **本地缓存输出**：默认将构建产物输出到 `.deps/obs_sdk/<platform>/`，不会覆盖仓库源码树中的文件。
+- **后续构建**：脚本成功后会打印 `OBS_SDK_ROOT` 和下一步 `make` 命令，供真实 SDK 模式编译使用。

@@ -7,11 +7,13 @@ import shutil
 import time
 import sys
 import re
+import platform
 
 # ================= 配置区域 =================
 CONFIG_FILE = 'config.dat'
 CONFIG_BAK = 'config.dat.bak'
-LIB_DIR = './lib'
+USERS_FILE = 'users.dat'
+USERS_BAK = 'users.dat.bak'
 CACHE_DIR = './test_bin_cache'  # 存放编译产物的临时目录
 TEST_DATA_FILE = './test_data.bin' # 本地测试数据文件
 TEST_DATA_SIZE_MB = 5           # 测试数据大小 (MB)
@@ -21,29 +23,43 @@ EnableDataValidation = 'false' #冒烟测试无需校验一致性
 TEST_CASES = [201, 202, 204, 216, 230, 900]
 TEST_DURATION = 0
 
-# 编译任务顺序: (显示名称, Make命令, 产物文件名)
-# 顺序: Mock -> Standard -> Mock_ASan -> ASan
-BUILD_TASKS = [
-    ("Mock",        "make mock",        "obs_c_bench_mock"),
-    ("Standard",    "make",             "obs_c_bench"),
-    ("Mock_ASan",   "make mock_asan",   "obs_c_bench_mock_asan"),
-    ("ASan",        "make asan",        "obs_c_bench_asan")
-]
+def default_sdk_root(work_dir):
+    platform_tag = f"{platform.system().lower()}-{platform.machine().lower()}"
+    return os.path.join(work_dir, ".deps", "obs_sdk", platform_tag)
+
+
+def build_tasks_for_env(has_real_sdk):
+    tasks = [
+        ("Mock", "make mock", "obs_c_bench_mock"),
+        ("Mock_ASan", "make mock_asan", "obs_c_bench_mock_asan"),
+    ]
+    if has_real_sdk:
+        tasks.insert(1, ("Standard", "make", "obs_c_bench"))
+        tasks.append(("ASan", "make asan", "obs_c_bench_asan"))
+    return tasks
+
 # ===========================================
 
 class BenchmarkTester:
     def __init__(self):
         self.results = []
-        self.work_dir = os.path.dirname(os.path.abspath(__file__))
+        self.created_config = False
+        self.created_users = False
+        self.work_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         os.chdir(self.work_dir)
+        self.sdk_root = os.environ.get("OBS_SDK_ROOT", default_sdk_root(self.work_dir))
+        self.has_real_sdk = os.path.exists(os.path.join(self.sdk_root, "include", "eSDKOBS.h"))
+        self.build_tasks = build_tasks_for_env(self.has_real_sdk)
         
         # 设置环境变量
         self.env = os.environ.copy()
-        lib_path = os.path.abspath(LIB_DIR)
-        if 'LD_LIBRARY_PATH' in self.env:
-            self.env['LD_LIBRARY_PATH'] = f"{lib_path}:{self.env['LD_LIBRARY_PATH']}"
-        else:
-            self.env['LD_LIBRARY_PATH'] = lib_path
+        if self.has_real_sdk:
+            lib_path = os.path.join(self.sdk_root, "lib")
+            self.env["OBS_SDK_ROOT"] = self.sdk_root
+            if 'LD_LIBRARY_PATH' in self.env:
+                self.env['LD_LIBRARY_PATH'] = f"{lib_path}:{self.env['LD_LIBRARY_PATH']}"
+            else:
+                self.env['LD_LIBRARY_PATH'] = lib_path
 
     def run_cmd(self, cmd):
         """执行命令并返回 (returncode, stdout+stderr)"""
@@ -79,9 +95,17 @@ class BenchmarkTester:
         if os.path.exists(CONFIG_FILE):
             shutil.copy(CONFIG_FILE, CONFIG_BAK)
         else:
+            self.created_config = True
             # 创建默认 Config
             with open(CONFIG_FILE, 'w') as f:
                 f.write(f"Endpoint=obs.example.com\nAK=test\nSK=test\nBucket=test\nUsers=1\nThreadsPerUser=1\nTestCase=201\nRunSeconds=3\nUploadFilePath={TEST_DATA_FILE}\n")
+
+        if os.path.exists(USERS_FILE):
+            shutil.copy(USERS_FILE, USERS_BAK)
+        else:
+            self.created_users = True
+            with open(USERS_FILE, 'w') as f:
+                f.write("user1, TEST_AK, TEST_SK\n")
         
         # 动态修改 Config: 运行时间和 UploadFilePath
         sed_cmds = [
@@ -97,6 +121,16 @@ class BenchmarkTester:
         # 恢复 Config
         if os.path.exists(CONFIG_BAK):
             shutil.move(CONFIG_BAK, CONFIG_FILE)
+        elif self.created_config and os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
+        if os.path.exists(USERS_BAK):
+            shutil.move(USERS_BAK, USERS_FILE)
+        elif self.created_users and os.path.exists(USERS_FILE):
+            os.remove(USERS_FILE)
+        for extra_dir in ['test_reports_out', 'test_logs_out']:
+            extra_path = os.path.join(self.work_dir, extra_dir)
+            if os.path.exists(extra_path):
+                shutil.rmtree(extra_path)
         # 清理缓存
         if os.path.exists(CACHE_DIR): shutil.rmtree(CACHE_DIR)
 
@@ -115,7 +149,10 @@ class BenchmarkTester:
         print(">>> Stage 1: Compilation Check (Fail-Fast)")
         print("=" * 60)
         
-        for name, make_cmd, bin_name in BUILD_TASKS:
+        if not self.has_real_sdk:
+            print(f"[Info] Real OBS SDK not found under {self.sdk_root}, running mock-only compilation.")
+
+        for name, make_cmd, bin_name in self.build_tasks:
             print(f"[{name}] Compiling...", end='', flush=True)
             
             self.run_cmd("make clean")
@@ -147,7 +184,7 @@ class BenchmarkTester:
         print(">>> Stage 2: Smoke Testing (Mock -> Std -> Mock_ASan -> ASan)")
         print("=" * 60)
         
-        for name, _, bin_name in BUILD_TASKS:
+        for name, _, bin_name in self.build_tasks:
             bin_path = os.path.join(CACHE_DIR, bin_name)
             print(f"\n--- Testing Build: {name} ---")
             
@@ -187,6 +224,81 @@ class BenchmarkTester:
                     "Detail": detail
                 })
 
+    def stage_cli_archive_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 3: Output Dir Split & CLI Verification")
+        print("=" * 60)
+
+        bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
+        existing_logs = set(d for d in os.listdir("logs") if d.startswith("task_")) if os.path.exists("logs") else set()
+        existing_reports = set(d for d in os.listdir("reports") if d.startswith("task_")) if os.path.exists("reports") else set()
+        custom_report_root = os.path.join(self.work_dir, "test_reports_out")
+        custom_log_root = os.path.join(self.work_dir, "test_logs_out")
+        if os.path.exists(custom_report_root):
+            shutil.rmtree(custom_report_root)
+        if os.path.exists(custom_log_root):
+            shutil.rmtree(custom_log_root)
+
+        cmd = (
+            f"{bin_path} --config {CONFIG_FILE} --users {USERS_FILE} "
+            f"--op upload --threads 2 --object-size 1MB "
+            f"--output-dir {custom_report_root} --log-dir {custom_log_root}"
+        )
+        ret, output = self.run_cmd(cmd)
+        if ret != 0:
+            print(output)
+            return False
+
+        new_logs = sorted(set(d for d in os.listdir("logs") if d.startswith("task_")) - existing_logs)
+        new_reports = sorted(set(d for d in os.listdir("reports") if d.startswith("task_")) - existing_reports)
+        if new_logs:
+            print("[FAIL] Default logs directory should not receive task output when --log-dir is used.")
+            return False
+        if new_reports:
+            print("[FAIL] Default reports directory should not receive task output when --output-dir is used.")
+            return False
+
+        if not os.path.exists(custom_report_root) or not os.path.exists(custom_log_root):
+            print("[FAIL] Custom output roots were not created.")
+            return False
+
+        report_tasks = sorted(d for d in os.listdir(custom_report_root) if d.startswith("task_"))
+        log_tasks = sorted(d for d in os.listdir(custom_log_root) if d.startswith("task_"))
+        if not report_tasks or not log_tasks:
+            print("[FAIL] Missing task directories under custom report/log roots.")
+            return False
+        if report_tasks[-1] != log_tasks[-1]:
+            print("[FAIL] Report and log task ids do not match.")
+            return False
+
+        report_dir = os.path.join(custom_report_root, report_tasks[-1])
+        log_dir = os.path.join(custom_log_root, log_tasks[-1])
+        archive_path = os.path.join(report_dir, "archive.csv")
+        brief_path = os.path.join(report_dir, "brief.txt")
+        realtime_path = os.path.join(log_dir, "realtime.txt")
+
+        if not os.path.exists(archive_path):
+            print(f"[FAIL] Missing archive.csv in {report_dir}")
+            return False
+        if not os.path.exists(brief_path):
+            print(f"[FAIL] Missing brief.txt in {report_dir}")
+            return False
+        if not os.path.exists(realtime_path):
+            print(f"[FAIL] Missing realtime.txt in {log_dir}")
+            return False
+
+        archive_text = open(archive_path, "r", encoding="utf-8").read()
+        realtime_text = open(realtime_path, "r", encoding="utf-8").read()
+        if "object_size_spec" not in archive_text or ",1MB," not in archive_text:
+            print("[FAIL] archive.csv missing object size override evidence.")
+            return False
+        if "Interval_BPS(Bytes/s)" not in realtime_text:
+            print("[FAIL] realtime.txt missing extended sampling header.")
+            return False
+
+        print(f"[PASS] Split output verification succeeded: reports={report_dir} logs={log_dir}")
+        return True
+
     def print_summary(self):
         print("\n" + "=" * 60)
         print(f"{'BUILD':<12} | {'CASE':<6} | {'STATUS':<10} | {'DETAIL'}")
@@ -224,6 +336,8 @@ class BenchmarkTester:
                 print(">>> ABORTING: Compilation failed.")
                 sys.exit(1)
             self.stage_smoke_test()
+            if not self.stage_cli_archive_test():
+                sys.exit(1)
             self.print_summary()
         except KeyboardInterrupt:
             print("\nInterrupted.")
