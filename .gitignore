@@ -5,16 +5,24 @@
 *.dll
 *.exe
 obs_c_bench
+obs_c_bench_mock
+obs_c_bench_asan
+obs_c_bench_mock_asan
 
 # 目录
 lib/
 logs/
+reports/
 build/
 dist/
 bin/
+.deps/
 huaweicloud-sdk-c-obs-master/
 upload_checkpoint/
 csdk_demo/
+test_bin_cache/
+test_reports_out/
+test_logs_out/
 
 # 数据文件
 temptoken.dat
@@ -44,4 +52,5 @@ report.html
 
 # sdk源码包
 master.zip
+master_downloaded.zip
 .antigravity/

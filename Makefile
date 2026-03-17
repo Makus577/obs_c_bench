@@ -1,8 +1,19 @@
 CC = gcc
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+PLATFORM := $(shell echo "$(UNAME_S)" | tr A-Z a-z)-$(UNAME_M)
+DEFAULT_OBS_SDK_ROOT := $(CURDIR)/.deps/obs_sdk/$(PLATFORM)
+OBS_SDK_ROOT ?= $(DEFAULT_OBS_SDK_ROOT)
+OBS_SDK_INCLUDE := $(OBS_SDK_ROOT)/include
+OBS_SDK_LIB := $(OBS_SDK_ROOT)/lib
 # 基础编译选项
 CFLAGS = -Wall -O2 -g -I./include -D_GNU_SOURCE -std=gnu99
 # 基础链接选项
-LDFLAGS = -lpthread -lrt
+LDFLAGS = -lpthread
+
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS += -lrt
+endif
 
 # 基础目标名称
 TARGET_BASE = obs_c_bench
@@ -25,8 +36,8 @@ ifdef MOCK_SDK_MODE
     BUILD_TYPE_MSG += [Mock SDK Mode]
 else
     # 真实 SDK 模式下链接 eSDKOBS 库
-    # 请确保 libeSDKOBS.so 在 ./lib 目录下
-    LDFLAGS += -L./lib -leSDKOBS -Wl,-rpath-link=./lib -Wl,-rpath=./lib -lstdc++ -lm
+    CFLAGS += -I$(OBS_SDK_INCLUDE)
+    LDFLAGS += -L$(OBS_SDK_LIB) -leSDKOBS -Wl,-rpath-link=$(OBS_SDK_LIB) -Wl,-rpath=$(OBS_SDK_LIB) -lstdc++ -lm
     BUILD_TYPE_MSG += [Real SDK Mode]
 endif
 
@@ -46,10 +57,24 @@ OBJS = $(SRCS:.c=.o)
 # 构建目标
 # -----------------------------------------------------------
 
-.PHONY: all clean mock asan mock_asan clean_objs help
+.PHONY: all clean mock asan mock_asan clean_objs help check-sdk sdk-bootstrap
 
 # 默认目标
-all: $(TARGET)
+all: check-sdk $(TARGET)
+
+check-sdk:
+ifndef MOCK_SDK_MODE
+	@if [ ! -f "$(OBS_SDK_INCLUDE)/eSDKOBS.h" ]; then \
+		echo "Missing OBS C SDK header: $(OBS_SDK_INCLUDE)/eSDKOBS.h"; \
+		echo "Run 'make sdk-bootstrap' or build with OBS_SDK_ROOT=/abs/path/to/sdk make"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(OBS_SDK_LIB)/libeSDKOBS.so" ] && [ ! -f "$(OBS_SDK_LIB)/libeSDKOBS.dylib" ] && [ ! -f "$(OBS_SDK_LIB)/libeSDKOBS.a" ]; then \
+		echo "Missing OBS C SDK library under: $(OBS_SDK_LIB)"; \
+		echo "Run 'make sdk-bootstrap' or build with OBS_SDK_ROOT=/abs/path/to/sdk make"; \
+		exit 1; \
+	fi
+endif
 
 $(TARGET): $(OBJS)
 	@echo "Linking $(TARGET)..."
@@ -86,6 +111,10 @@ mock_asan:
 	$(MAKE) clean_objs
 	$(MAKE) MOCK_SDK_MODE=1 ENABLE_ASAN=1
 
+sdk-bootstrap:
+	@echo "Bootstrapping OBS C SDK into $(OBS_SDK_ROOT)..."
+	python3 scripts/sdk/update_sdk.py --output-root "$(OBS_SDK_ROOT)"
+
 # -----------------------------------------------------------
 # 清理
 # -----------------------------------------------------------
@@ -108,4 +137,7 @@ help:
 	@echo "  make mock       -> obs_c_bench_mock      (Mock SDK)"
 	@echo "  make asan       -> obs_c_bench_asan      (Real SDK + ASan)"
 	@echo "  make mock_asan  -> obs_c_bench_mock_asan (Mock SDK + ASan)"
+	@echo "  make sdk-bootstrap -> download/build OBS C SDK into $(DEFAULT_OBS_SDK_ROOT)"
 	@echo "  make clean      -> Remove all artifacts"
+	@echo "Variables:"
+	@echo "  OBS_SDK_ROOT=/abs/path/to/sdk make"
