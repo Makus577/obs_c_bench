@@ -19,6 +19,9 @@ CACHE_DIR = './test_bin_cache'  # 存放编译产物的临时目录
 TEST_DATA_FILE = './test_data.bin' # 本地测试数据文件
 TEST_DATA_SIZE_MB = 5           # 测试数据大小 (MB)
 EnableDataValidation = 'false' #冒烟测试无需校验一致性
+SUITE_FILE = './test_suite.yaml'
+PROFILE_CONFIG_A = './test_profile_a.dat'
+PROFILE_CONFIG_B = './test_profile_b.dat'
 
 # 测试用例 ID
 TEST_CASES = [201, 202, 204, 216, 230, 900]
@@ -128,10 +131,14 @@ class BenchmarkTester:
             shutil.move(USERS_BAK, USERS_FILE)
         elif self.created_users and os.path.exists(USERS_FILE):
             os.remove(USERS_FILE)
-        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out']:
+        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out', 'test_suite_reports', 'test_suite_logs', 'test_auto_baseline']:
             extra_path = os.path.join(self.work_dir, extra_dir)
             if os.path.exists(extra_path):
                 shutil.rmtree(extra_path)
+        for extra_file in [SUITE_FILE, PROFILE_CONFIG_A, PROFILE_CONFIG_B]:
+            extra_path = os.path.join(self.work_dir, extra_file)
+            if os.path.exists(extra_path):
+                os.remove(extra_path)
         # 清理缓存
         if os.path.exists(CACHE_DIR): shutil.rmtree(CACHE_DIR)
 
@@ -289,6 +296,7 @@ class BenchmarkTester:
             return False
 
         archive_text = open(archive_path, "r", encoding="utf-8").read()
+        brief_text = open(brief_path, "r", encoding="utf-8").read()
         realtime_text = open(realtime_path, "r", encoding="utf-8").read()
         if "object_size_spec" not in archive_text or ",1MB," not in archive_text:
             print("[FAIL] archive.csv missing object size override evidence.")
@@ -296,8 +304,17 @@ class BenchmarkTester:
         if "scenario_id" not in archive_text or "smoke_upload_1mb_2t" not in archive_text:
             print("[FAIL] archive.csv missing scenario_id metadata.")
             return False
+        if "avg_single_core_cpu_pct" not in archive_text or "peak_single_core_cpu_pct" not in archive_text:
+            print("[FAIL] archive.csv missing single-core CPU columns.")
+            return False
         if "Interval_BPS(Bytes/s)" not in realtime_text:
             print("[FAIL] realtime.txt missing extended sampling header.")
+            return False
+        if "SingleCoreCPU(%)" not in realtime_text:
+            print("[FAIL] realtime.txt missing SingleCoreCPU(%) header.")
+            return False
+        if "MB/s" not in brief_text and "KB/s" not in brief_text and "Bytes/s" not in brief_text:
+            print("[FAIL] brief.txt missing human-readable rate unit.")
             return False
 
         print(f"[PASS] Split output verification succeeded: reports={report_dir} logs={log_dir}")
@@ -336,6 +353,10 @@ class BenchmarkTester:
             return False
         if not os.path.exists(os.path.join(compare_dir, "compare.md")):
             print("[FAIL] compare_archive.py did not produce compare.md")
+            return False
+        compare_md = open(os.path.join(compare_dir, "compare.md"), "r", encoding="utf-8").read()
+        if "/s" not in compare_md:
+            print("[FAIL] compare.md missing human-readable throughput units.")
             return False
 
         pass_dir = os.path.join(perf_root, "gate_pass")
@@ -402,6 +423,301 @@ class BenchmarkTester:
         print(f"[PASS] Perf gate verification succeeded under {perf_root}")
         return True
 
+    def stage_suite_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 5: Suite Mode & Long-Run Artifact Verification")
+        print("=" * 60)
+
+        bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
+        suite_report_root = os.path.join(self.work_dir, "test_suite_reports")
+        suite_log_root = os.path.join(self.work_dir, "test_suite_logs")
+        profile_a = os.path.join(self.work_dir, PROFILE_CONFIG_A)
+        profile_b = os.path.join(self.work_dir, PROFILE_CONFIG_B)
+        suite_path = os.path.join(self.work_dir, SUITE_FILE)
+
+        shutil.copy(CONFIG_FILE, profile_a)
+        shutil.copy(CONFIG_FILE, profile_b)
+
+        suite_yaml = f"""suite_id: smoke_suite
+description: mock suite verification
+defaults:
+  users_file: {USERS_FILE}
+  requests_per_thread: 2
+profiles:
+  inter_oneway:
+    config_file: {PROFILE_CONFIG_A}
+  gm_oneway:
+    config_file: {PROFILE_CONFIG_B}
+matrix:
+  profile: [inter_oneway, gm_oneway]
+  op: [upload]
+  threads: [2]
+  object_size: [1MB]
+scenarios:
+  - scenario_id: suite_download_custom
+    profile: inter_oneway
+    op: download
+    threads: 1
+    object_size: 512KB
+    analyze_longrun: true
+gates:
+  longrun:
+    enabled: false
+    fail_on_regression: false
+    policy: ci/perf/longrun_policy.yaml
+reporting:
+  continue_on_fail: true
+"""
+        with open(suite_path, "w", encoding="utf-8") as handle:
+            handle.write(suite_yaml)
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --suite {suite_path} --output-dir {suite_report_root} --log-dir {suite_log_root}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Suite mode should succeed in mock environment.")
+            return False
+
+        suite_root = os.path.join(suite_report_root, "smoke_suite")
+        if not os.path.exists(suite_root):
+            print("[FAIL] Missing suite report root.")
+            return False
+        run_dirs = sorted(os.listdir(suite_root))
+        if not run_dirs:
+            print("[FAIL] Missing suite run directories.")
+            return False
+        run_dir = os.path.join(suite_root, run_dirs[-1])
+        summary_dir = os.path.join(run_dir, "summary")
+        suite_log_run_dir = os.path.join(suite_log_root, "smoke_suite", run_dirs[-1], "scenarios")
+
+        expected_summary_files = [
+            "suite_manifest_resolved.yaml",
+            "suite_summary.csv",
+            "suite_summary.json",
+            "suite_summary.md",
+            "suite_failures.json",
+        ]
+        for filename in expected_summary_files:
+            if not os.path.exists(os.path.join(summary_dir, filename)):
+                print(f"[FAIL] Missing suite summary artifact: {filename}")
+                return False
+
+        scenario_dir = os.path.join(run_dir, "scenarios", "suite_download_custom")
+        if not os.path.exists(os.path.join(scenario_dir, "archive.csv")):
+            print("[FAIL] Missing scenario archive.csv under suite output.")
+            return False
+        if not os.path.exists(os.path.join(scenario_dir, "longrun_summary.json")):
+            print("[FAIL] Missing longrun_summary.json for analyzed scenario.")
+            return False
+        if not os.path.exists(os.path.join(suite_log_run_dir, "suite_download_custom", "realtime.txt")):
+            print("[FAIL] Missing suite scenario realtime.txt.")
+            return False
+
+        with open(os.path.join(summary_dir, "suite_summary.csv"), "r", encoding="utf-8") as handle:
+            summary_text = handle.read()
+        if "suite_download_custom" not in summary_text or "smoke_suite" not in summary_text:
+            print("[FAIL] suite_summary.csv missing scenario or suite id.")
+            return False
+        if "avg_single_core_cpu_pct" not in summary_text or "peak_single_core_cpu_pct" not in summary_text:
+            print("[FAIL] suite_summary.csv missing single-core CPU columns.")
+            return False
+        suite_md = open(os.path.join(summary_dir, "suite_summary.md"), "r", encoding="utf-8").read()
+        if "/s" not in suite_md:
+            print("[FAIL] suite_summary.md missing human-readable throughput units.")
+            return False
+
+        with open(os.path.join(scenario_dir, "longrun_summary.json"), "r", encoding="utf-8") as handle:
+            longrun_data = json.load(handle)
+        if longrun_data.get("longrun_status") not in ("PASS", "WARN", "FAIL", "INSUFFICIENT_DATA"):
+            print("[FAIL] longrun_summary.json missing longrun_status.")
+            return False
+        if "single_core_cpu_start_pct" not in longrun_data:
+            print("[FAIL] longrun_summary.json missing single-core CPU trend fields.")
+            return False
+        longrun_md = open(os.path.join(scenario_dir, "longrun_summary.md"), "r", encoding="utf-8").read()
+        if "/s" not in longrun_md:
+            print("[FAIL] longrun_summary.md missing human-readable throughput units.")
+            return False
+
+        print(f"[PASS] Suite mode verification succeeded under {run_dir}")
+        return True
+
+    def stage_suite_baseline_automation_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 6: Auto Baseline Generate & Compare Verification")
+        print("=" * 60)
+
+        bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
+        auto_root = os.path.join(self.work_dir, "test_auto_baseline")
+        reports_root = os.path.join(auto_root, "reports")
+        logs_root = os.path.join(auto_root, "logs")
+        baseline_store = os.path.join(auto_root, "baseline_store")
+        baselines_manifest = os.path.join(auto_root, "baselines.csv")
+        generate_suite = os.path.join(auto_root, "baseline_generate.yaml")
+        compare_suite = os.path.join(auto_root, "baseline_compare.yaml")
+        profile_path = os.path.join(auto_root, "baseline_profile.dat")
+        perf_policy = os.path.join(self.work_dir, "ci", "perf", "gate_policy.json")
+        users_path = os.path.join(self.work_dir, USERS_FILE)
+
+        os.makedirs(auto_root, exist_ok=True)
+        shutil.copy(CONFIG_FILE, profile_path)
+
+        generate_yaml = f"""suite_id: auto_baseline_generate
+defaults:
+  users_file: {users_path}
+profiles:
+  base:
+    config_file: {profile_path}
+scenarios:
+  - scenario_id: auto_baseline_upload_1mb_2t
+    profile: base
+    op: upload
+    threads: 2
+    object_size: 1MB
+baseline:
+  enabled: true
+  mode: generate
+  manifest: {baselines_manifest}
+  store_dir: {baseline_store}
+  policy: {perf_policy}
+  update_strategy: new_label
+reporting:
+  continue_on_fail: true
+"""
+        compare_yaml = f"""suite_id: auto_baseline_compare
+defaults:
+  users_file: {users_path}
+profiles:
+  base:
+    config_file: {profile_path}
+scenarios:
+  - scenario_id: auto_baseline_upload_1mb_2t
+    profile: base
+    op: upload
+    threads: 2
+    object_size: 1MB
+baseline:
+  enabled: true
+  mode: compare
+  manifest: {baselines_manifest}
+  store_dir: {baseline_store}
+  policy: {perf_policy}
+reporting:
+  continue_on_fail: true
+"""
+        invalid_legacy_suite = os.path.join(auto_root, "baseline_legacy_invalid.yaml")
+        invalid_legacy_yaml = f"""suite_id: auto_baseline_legacy_invalid
+defaults:
+  users_file: {users_path}
+profiles:
+  base:
+    config_file: {profile_path}
+scenarios:
+  - scenario_id: auto_baseline_upload_1mb_2t
+    profile: base
+    op: upload
+    threads: 2
+    object_size: 1MB
+gates:
+  perf:
+    enabled: true
+    mode: compare
+    baselines_manifest: {baselines_manifest}
+    baseline_store_dir: {baseline_store}
+    policy: {perf_policy}
+"""
+        with open(generate_suite, "w", encoding="utf-8") as handle:
+            handle.write(generate_yaml)
+        with open(compare_suite, "w", encoding="utf-8") as handle:
+            handle.write(compare_yaml)
+        with open(invalid_legacy_suite, "w", encoding="utf-8") as handle:
+            handle.write(invalid_legacy_yaml)
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --suite {generate_suite} --output-dir {reports_root} --log-dir {logs_root}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Suite baseline generate run should succeed.")
+            return False
+        if not os.path.exists(baselines_manifest):
+            print("[FAIL] Baselines manifest was not generated.")
+            return False
+        manifest_text = open(baselines_manifest, "r", encoding="utf-8").read()
+        if "auto_baseline_upload_1mb_2t" not in manifest_text:
+            print("[FAIL] Baselines manifest missing generated scenario entry.")
+            return False
+        if "updated_at" not in manifest_text or "baseline_source_run" not in manifest_text:
+            print("[FAIL] Baselines manifest missing new metadata columns.")
+            return False
+        baseline_files = [name for name in os.listdir(baseline_store) if name.startswith("auto_baseline_upload_1mb_2t__")]
+        if len(baseline_files) != 1:
+            print("[FAIL] Expected exactly one versioned baseline artifact after generate run.")
+            return False
+
+        generate_root = os.path.join(reports_root, "auto_baseline_generate")
+        generate_runs = sorted(os.listdir(generate_root))
+        generate_summary_dir = os.path.join(generate_root, generate_runs[-1], "summary")
+        generate_summary_text = open(os.path.join(generate_summary_dir, "suite_summary.csv"), "r", encoding="utf-8").read()
+        if "BASELINE_UPDATED" not in generate_summary_text:
+            print("[FAIL] Generate suite summary missing BASELINE_UPDATED status.")
+            return False
+        if "final_status" not in generate_summary_text or "PASS" not in generate_summary_text:
+            print("[FAIL] Generate suite summary missing final_status PASS.")
+            return False
+        with open(os.path.join(generate_summary_dir, "suite_failures.json"), "r", encoding="utf-8") as handle:
+            generate_failures = json.load(handle)
+        if generate_failures:
+            print("[FAIL] suite_failures.json should not treat BASELINE_UPDATED as failure.")
+            return False
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --suite {compare_suite} --output-dir {reports_root} --log-dir {logs_root}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Suite baseline compare run should pass against generated baseline.")
+            return False
+
+        compare_root = os.path.join(reports_root, "auto_baseline_compare")
+        run_dirs = sorted(os.listdir(compare_root))
+        if not run_dirs:
+            print("[FAIL] Missing compare suite run directory.")
+            return False
+        summary_dir = os.path.join(compare_root, run_dirs[-1], "summary")
+        scenario_dir = os.path.join(compare_root, run_dirs[-1], "scenarios", "auto_baseline_upload_1mb_2t")
+        if not os.path.exists(os.path.join(scenario_dir, "perf_gate", "gate_result.json")):
+            print("[FAIL] Missing perf_gate/gate_result.json for compare suite.")
+            return False
+        with open(os.path.join(scenario_dir, "perf_gate", "gate_result.json"), "r", encoding="utf-8") as handle:
+            gate_result = json.load(handle)
+        if gate_result.get("overall_status") != "PASS":
+            print("[FAIL] Compare suite did not report PASS against generated baseline.")
+            return False
+        summary_text = open(os.path.join(summary_dir, "suite_summary.csv"), "r", encoding="utf-8").read()
+        if "perf_status" not in summary_text or "final_status" not in summary_text:
+            print("[FAIL] Compare suite summary missing perf_status/final_status columns.")
+            return False
+        if "PASS" not in summary_text:
+            print("[FAIL] Compare suite summary missing PASS result.")
+            return False
+        with open(os.path.join(summary_dir, "suite_failures.json"), "r", encoding="utf-8") as handle:
+            compare_failures = json.load(handle)
+        if compare_failures:
+            print("[FAIL] Compare suite should not produce suite_failures.json entries.")
+            return False
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --suite {invalid_legacy_suite} --output-dir {reports_root} --log-dir {logs_root}"
+        )
+        if ret == 0 or "gates.perf is no longer supported" not in output:
+            print("[FAIL] Legacy gates.perf syntax should fail with a clear error.")
+            return False
+
+        print(f"[PASS] Auto baseline generate/compare verification succeeded under {auto_root}")
+        return True
+
     def print_summary(self):
         print("\n" + "=" * 60)
         print(f"{'BUILD':<12} | {'CASE':<6} | {'STATUS':<10} | {'DETAIL'}")
@@ -442,6 +758,10 @@ class BenchmarkTester:
             if not self.stage_cli_archive_test():
                 sys.exit(1)
             if not self.stage_perf_gate_test():
+                sys.exit(1)
+            if not self.stage_suite_test():
+                sys.exit(1)
+            if not self.stage_suite_baseline_automation_test():
                 sys.exit(1)
             self.print_summary()
         except KeyboardInterrupt:

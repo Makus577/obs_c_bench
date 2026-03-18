@@ -1,0 +1,16 @@
+metrics:
+  rss_growth_mb:
+    warn_max: 64.0
+    fail_max: 128.0
+  rss_slope_mb_per_hour:
+    warn_max: 32.0
+    fail_max: 64.0
+  tps_drift_pct:
+    warn_min: -5.0
+    fail_min: -10.0
+  bps_drift_pct:
+    warn_min: -5.0
+    fail_min: -10.0
+  success_rate_end_pct:
+    warn_min: 99.5
+    fail_min: 99.0

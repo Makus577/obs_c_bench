@@ -200,6 +200,8 @@ typedef struct {
     double max_single_stream_bps;
     double avg_cpu_pct;
     double peak_cpu_pct;
+    double avg_single_core_cpu_pct;
+    double peak_single_core_cpu_pct;
     double avg_rss_mb;
     double peak_rss_mb;
 } BenchmarkSummary;

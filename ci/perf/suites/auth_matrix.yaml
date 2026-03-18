@@ -1,0 +1,40 @@
+suite_id: auth_matrix
+description: Inter/GM auth matrix benchmark example
+defaults:
+  users_file: ./users.dat
+  requests_per_thread: 100
+profiles:
+  inter_oneway:
+    config_file: ./configs/inter_oneway.dat
+  inter_mutual:
+    config_file: ./configs/inter_mutual.dat
+  gm_oneway:
+    config_file: ./configs/gm_oneway.dat
+  gm_mutual:
+    config_file: ./configs/gm_mutual.dat
+matrix:
+  profile: [inter_oneway, inter_mutual, gm_oneway, gm_mutual]
+  op: [put, get]
+  threads: [64, 128]
+  object_size: [1MB, 4MB]
+scenarios:
+  - scenario_id: gm_mutual_get_1mb_longrun
+    profile: gm_mutual
+    op: get
+    threads: 128
+    object_size: 1MB
+    analyze_longrun: true
+baseline:
+  enabled: true
+  mode: compare
+  manifest: ../baselines.csv
+  store_dir: ../baseline_archives
+  policy: ../gate_policy.json
+  update_strategy: new_label
+gates:
+  longrun:
+    enabled: true
+    fail_on_regression: true
+    policy: ../longrun_policy.yaml
+reporting:
+  continue_on_fail: true

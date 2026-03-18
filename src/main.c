@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <getopt.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 
 volatile sig_atomic_t g_graceful_stop = 0;
 
@@ -19,6 +20,7 @@ typedef struct {
     char log_task_dir[PATH_MAX];
     int sample_count;
     int cpu_sample_count;
+    int single_core_cpu_sample_count;
     int rss_sample_count;
     int wrote_samples;
     long long prev_total_requests;
@@ -28,10 +30,13 @@ typedef struct {
     double prev_cpu_s;
     double cpu_sum_pct;
     double cpu_peak_pct;
+    double single_core_cpu_sum_pct;
+    double single_core_cpu_peak_pct;
     double rss_sum_mb;
     double rss_peak_mb;
     double peak_tps;
     double peak_bps;
+    int logical_cpu_count;
 } MonitorArgs;
 
 typedef struct {
@@ -39,6 +44,7 @@ typedef struct {
     char users_file[PATH_MAX];
     char output_dir[PATH_MAX];
     char log_dir[PATH_MAX];
+    char suite_file[PATH_MAX];
     char scenario_id[128];
     char object_size_spec[64];
     int op_set;
@@ -48,7 +54,41 @@ typedef struct {
     int object_size_set;
     int output_dir_set;
     int log_dir_set;
+    int suite_mode;
 } CliOptions;
+
+typedef struct {
+    char suite_id[128];
+    char scenario_id[128];
+    char profile[128];
+    char config_file[PATH_MAX];
+    char users_file[PATH_MAX];
+    char op[32];
+    char object_size_spec[64];
+    char longrun_policy[PATH_MAX];
+    char baseline_mode[32];
+    char baseline_policy[PATH_MAX];
+    char baseline_manifest[PATH_MAX];
+    char baseline_store_dir[PATH_MAX];
+    char baseline_update_strategy[32];
+    int threads;
+    int run_seconds_set;
+    int run_seconds;
+    int requests_per_thread_set;
+    int requests_per_thread;
+    int continue_on_fail;
+    int analyze_longrun;
+    int gate_longrun;
+    int baseline_enabled;
+} SuiteScenario;
+
+typedef struct {
+    int exit_status;
+    int longrun_exit_status;
+    int baseline_exit_status;
+    char report_dir[PATH_MAX];
+    char log_dir[PATH_MAX];
+} ScenarioRunResult;
 
 void handle_sigint(int sig) {
     static volatile sig_atomic_t sigint_count = 0;
@@ -109,6 +149,87 @@ static double read_process_rss_mb(void) {
     fclose(fp);
     if (rss_kb < 0) return -1.0;
     return rss_kb / 1024.0;
+}
+
+static int get_logical_cpu_count(void) {
+    long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cpu_count <= 0) return 1;
+    return (int)cpu_count;
+}
+
+static void format_duration_human(double seconds, char *buf, size_t buf_size) {
+    long long total_seconds;
+    long long hours;
+    long long minutes;
+    long long secs;
+
+    if (!buf || buf_size == 0) return;
+    if (seconds < 0.0) {
+        snprintf(buf, buf_size, "N/A");
+        return;
+    }
+    total_seconds = (long long)(seconds + 0.5);
+    hours = total_seconds / 3600;
+    minutes = (total_seconds % 3600) / 60;
+    secs = total_seconds % 60;
+    if (hours > 0) snprintf(buf, buf_size, "%lldh %lldm %llds", hours, minutes, secs);
+    else if (minutes > 0) snprintf(buf, buf_size, "%lldm %llds", minutes, secs);
+    else snprintf(buf, buf_size, "%.2fs", seconds);
+}
+
+static void format_bytes_si(long long bytes, char *buf, size_t buf_size) {
+    const char *units[] = {"Bytes", "KB", "MB", "GB", "TB"};
+    double value = (double)bytes;
+    int unit_idx = 0;
+
+    if (!buf || buf_size == 0) return;
+    if (bytes < 0) {
+        snprintf(buf, buf_size, "N/A");
+        return;
+    }
+    while (value >= 1000.0 && unit_idx < 4) {
+        value /= 1000.0;
+        unit_idx++;
+    }
+    if (unit_idx == 0) snprintf(buf, buf_size, "%lld %s", bytes, units[unit_idx]);
+    else snprintf(buf, buf_size, "%.2f %s", value, units[unit_idx]);
+}
+
+static void format_rate_si(double bytes_per_sec, char *buf, size_t buf_size) {
+    const char *units[] = {"Bytes/s", "KB/s", "MB/s", "GB/s", "TB/s"};
+    double value = bytes_per_sec;
+    int unit_idx = 0;
+
+    if (!buf || buf_size == 0) return;
+    if (bytes_per_sec < 0.0) {
+        snprintf(buf, buf_size, "N/A");
+        return;
+    }
+    while (value >= 1000.0 && unit_idx < 4) {
+        value /= 1000.0;
+        unit_idx++;
+    }
+    snprintf(buf, buf_size, "%.2f %s", value, units[unit_idx]);
+}
+
+static void format_memory_mb_human(double value_mb, char *buf, size_t buf_size) {
+    if (!buf || buf_size == 0) return;
+    if (value_mb < 0.0) {
+        snprintf(buf, buf_size, "N/A");
+        return;
+    }
+    if (value_mb >= 1000.0) snprintf(buf, buf_size, "%.2f GB", value_mb / 1000.0);
+    else snprintf(buf, buf_size, "%.2f MB", value_mb);
+}
+
+static void format_latency_human(double latency_ms, char *buf, size_t buf_size) {
+    if (!buf || buf_size == 0) return;
+    if (latency_ms < 0.0) {
+        snprintf(buf, buf_size, "N/A");
+        return;
+    }
+    if (latency_ms >= 1000.0) snprintf(buf, buf_size, "%.2f s", latency_ms / 1000.0);
+    else snprintf(buf, buf_size, "%.2f ms", latency_ms);
 }
 
 static int ensure_directory(const char *path) {
@@ -231,6 +352,7 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     double delta_wall_s = now_wall_s - m_args->prev_wall_s;
     double current_cpu_s = process_cpu_seconds();
     double cpu_pct = -1.0;
+    double single_core_cpu_pct = -1.0;
     double rss_mb = read_process_rss_mb();
     double interval_tps = 0.0;
     double interval_bps = 0.0;
@@ -250,6 +372,7 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     if (current_cpu_s >= 0.0 && m_args->prev_cpu_s >= 0.0 && delta_wall_s > 0.0) {
         cpu_pct = ((current_cpu_s - m_args->prev_cpu_s) / delta_wall_s) * 100.0;
         if (cpu_pct < 0.0) cpu_pct = 0.0;
+        single_core_cpu_pct = cpu_pct / (m_args->logical_cpu_count > 0 ? m_args->logical_cpu_count : 1);
     }
 
     if (delta_wall_s > 0.0) {
@@ -270,6 +393,11 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
         m_args->cpu_sum_pct += cpu_pct;
         m_args->cpu_sample_count++;
         if (cpu_pct > m_args->cpu_peak_pct) m_args->cpu_peak_pct = cpu_pct;
+    }
+    if (single_core_cpu_pct >= 0.0) {
+        m_args->single_core_cpu_sum_pct += single_core_cpu_pct;
+        m_args->single_core_cpu_sample_count++;
+        if (single_core_cpu_pct > m_args->single_core_cpu_peak_pct) m_args->single_core_cpu_peak_pct = single_core_cpu_pct;
     }
     if (rss_mb >= 0.0) {
         m_args->rss_sum_mb += rss_mb;
@@ -295,10 +423,11 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     }
 
     if (rt_fp) {
-        fprintf(rt_fp, "%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.3f,%lld\n",
+        fprintf(rt_fp, "%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.3f,%lld\n",
                 elapsed_s,
                 progress_pct >= 0.0 ? progress_pct : 0.0,
                 cpu_pct,
+                single_core_cpu_pct,
                 rss_mb,
                 interval_tps,
                 interval_bps,
@@ -325,13 +454,14 @@ void *monitor_routine(void *arg) {
     snprintf(rt_filepath, sizeof(rt_filepath), "%s/realtime.txt", m_args->log_task_dir);
     rt_fp = fopen(rt_filepath, "w");
     if (rt_fp) {
-        fprintf(rt_fp, "RunTime(s),Process(%%),CPU(%%),RSS(MB),Interval_TPS,Interval_BPS(Bytes/s),Cumul_TPS,Cumul_BPS(Bytes/s),Peak_TPS,Peak_BPS(Bytes/s),Success_Rate(%%),Total_Reqs\n");
+        fprintf(rt_fp, "RunTime(s),Process(%%),CPU(%%),SingleCoreCPU(%%),RSS(MB),Interval_TPS,Interval_BPS(Bytes/s),Cumul_TPS,Cumul_BPS(Bytes/s),Peak_TPS,Peak_BPS(Bytes/s),Success_Rate(%%),Total_Reqs\n");
         fflush(rt_fp);
     }
 
     m_args->start_wall_s = monotonic_seconds();
     m_args->prev_wall_s = m_args->start_wall_s;
     m_args->prev_cpu_s = process_cpu_seconds();
+    m_args->logical_cpu_count = get_logical_cpu_count();
 
     while (!m_args->stop_flag && !g_graceful_stop) {
         int i;
@@ -347,6 +477,190 @@ void *monitor_routine(void *arg) {
     return NULL;
 }
 
+static void trim_newline(char *text) {
+    size_t len;
+    if (!text) return;
+    len = strlen(text);
+    while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r')) {
+        text[len - 1] = '\0';
+        len--;
+    }
+}
+
+static int run_capture_first_line(const char *cmd, char *out, size_t out_size) {
+    FILE *fp;
+    int status;
+
+    if (!cmd || !out || out_size == 0) return -1;
+    out[0] = '\0';
+
+    fp = popen(cmd, "r");
+    if (!fp) return -1;
+    if (!fgets(out, (int)out_size, fp)) {
+        pclose(fp);
+        return -1;
+    }
+    trim_newline(out);
+    status = pclose(fp);
+    if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int run_command_status(const char *cmd) {
+    int status = system(cmd);
+    if (status == -1) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+static int file_contains_text(const char *path, const char *needle) {
+    FILE *fp;
+    char line[512];
+    if (!path || !needle) return 0;
+    fp = fopen(path, "r");
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, needle)) {
+            fclose(fp);
+            return 1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
+
+static void make_timestamp_id(const char *prefix, char *buf, size_t buf_size) {
+    time_t now = time(NULL);
+    struct tm t_res;
+    struct tm *t = localtime_r(&now, &t_res);
+
+    if (t) {
+        snprintf(buf, buf_size, "%s_%04d%02d%02d_%02d%02d%02d",
+                 prefix,
+                 t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+                 t->tm_hour, t->tm_min, t->tm_sec);
+    } else {
+        snprintf(buf, buf_size, "%s_UNKNOWN", prefix);
+    }
+}
+
+static int parse_optional_int(const char *text, int *is_set) {
+    if (!text || text[0] == '\0') {
+        if (is_set) *is_set = 0;
+        return 0;
+    }
+    if (is_set) *is_set = 1;
+    return atoi(text);
+}
+
+static int parse_optional_bool(const char *text, int default_value) {
+    if (!text || text[0] == '\0') return default_value;
+    if (strcmp(text, "1") == 0 || strcasecmp(text, "true") == 0 || strcasecmp(text, "yes") == 0) return 1;
+    if (strcmp(text, "0") == 0 || strcasecmp(text, "false") == 0 || strcasecmp(text, "no") == 0) return 0;
+    return default_value;
+}
+
+static int load_suite_scenarios(const char *manifest_path, SuiteScenario **out_scenarios, int *out_count) {
+    FILE *fp;
+    char line[4096];
+    int count = 0;
+    int capacity = 16;
+    SuiteScenario *items = NULL;
+
+    if (!manifest_path || !out_scenarios || !out_count) return -1;
+    fp = fopen(manifest_path, "r");
+    if (!fp) return -1;
+
+    items = (SuiteScenario *)calloc(capacity, sizeof(SuiteScenario));
+    if (!items) {
+        fclose(fp);
+        return -1;
+    }
+
+    if (!fgets(line, sizeof(line), fp)) {
+        free(items);
+        fclose(fp);
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *fields[20] = {0};
+        char *cursor = line;
+        int field_count = 0;
+        SuiteScenario *scenario;
+
+        trim_newline(line);
+        if (line[0] == '\0') continue;
+
+        while (field_count < 20) {
+            char *tab = strchr(cursor, '\t');
+            fields[field_count++] = cursor;
+            if (!tab) break;
+            *tab = '\0';
+            cursor = tab + 1;
+        }
+        if (field_count < 20) continue;
+
+        if (count >= capacity) {
+            SuiteScenario *grown;
+            capacity *= 2;
+            grown = (SuiteScenario *)realloc(items, capacity * sizeof(SuiteScenario));
+            if (!grown) {
+                free(items);
+                fclose(fp);
+                return -1;
+            }
+            items = grown;
+        }
+
+        scenario = &items[count];
+        memset(scenario, 0, sizeof(*scenario));
+        snprintf(scenario->suite_id, sizeof(scenario->suite_id), "%s", fields[0]);
+        snprintf(scenario->scenario_id, sizeof(scenario->scenario_id), "%s", fields[1]);
+        snprintf(scenario->profile, sizeof(scenario->profile), "%s", fields[2]);
+        snprintf(scenario->config_file, sizeof(scenario->config_file), "%s", fields[3]);
+        snprintf(scenario->users_file, sizeof(scenario->users_file), "%s", fields[4]);
+        snprintf(scenario->op, sizeof(scenario->op), "%s", fields[5]);
+        scenario->threads = atoi(fields[6]);
+        snprintf(scenario->object_size_spec, sizeof(scenario->object_size_spec), "%s", fields[7]);
+        scenario->run_seconds = parse_optional_int(fields[8], &scenario->run_seconds_set);
+        scenario->requests_per_thread = parse_optional_int(fields[9], &scenario->requests_per_thread_set);
+        scenario->continue_on_fail = parse_optional_bool(fields[10], 1);
+        scenario->analyze_longrun = parse_optional_bool(fields[11], 0);
+        scenario->gate_longrun = parse_optional_bool(fields[12], 0);
+        snprintf(scenario->longrun_policy, sizeof(scenario->longrun_policy), "%s", fields[13]);
+        snprintf(scenario->baseline_mode, sizeof(scenario->baseline_mode), "%s", fields[14]);
+        scenario->baseline_enabled = parse_optional_bool(fields[15], 0);
+        snprintf(scenario->baseline_policy, sizeof(scenario->baseline_policy), "%s", fields[16]);
+        snprintf(scenario->baseline_manifest, sizeof(scenario->baseline_manifest), "%s", fields[17]);
+        snprintf(scenario->baseline_store_dir, sizeof(scenario->baseline_store_dir), "%s", fields[18]);
+        snprintf(scenario->baseline_update_strategy, sizeof(scenario->baseline_update_strategy), "%s", fields[19]);
+        count++;
+    }
+
+    fclose(fp);
+    *out_scenarios = items;
+    *out_count = count;
+    return 0;
+}
+
+static void cleanup_config_resources(Config *cfg) {
+    int i;
+    if (!cfg) return;
+    if (cfg->user_list) {
+        free(cfg->user_list);
+        cfg->user_list = NULL;
+    }
+    for (i = 0; i < cfg->range_count; i++) {
+        if (cfg->range_options[i]) {
+            free(cfg->range_options[i]);
+            cfg->range_options[i] = NULL;
+        }
+    }
+}
+
 static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
@@ -357,6 +671,7 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
         {"scenario-id", required_argument, 0, 'S'},
         {"output-dir", required_argument, 0, 'O'},
         {"log-dir", required_argument, 0, 'L'},
+        {"suite", required_argument, 0, 'q'},
         {0, 0, 0, 0}
     };
     int opt;
@@ -367,7 +682,7 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
     snprintf(cli->output_dir, sizeof(cli->output_dir), "reports");
     snprintf(cli->log_dir, sizeof(cli->log_dir), "logs");
 
-    while ((opt = getopt_long(argc, argv, "c:u:o:t:s:S:O:L:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:u:o:t:s:S:O:L:q:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'c':
                 snprintf(cli->config_file, sizeof(cli->config_file), "%s", optarg);
@@ -405,6 +720,10 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
                 snprintf(cli->log_dir, sizeof(cli->log_dir), "%s", optarg);
                 cli->log_dir_set = 1;
                 break;
+            case 'q':
+                snprintf(cli->suite_file, sizeof(cli->suite_file), "%s", optarg);
+                cli->suite_mode = 1;
+                break;
             default:
                 return -1;
         }
@@ -412,7 +731,10 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
 
     while (optind < argc) {
         int parsed_case = 0;
-        if (!cli->op_set && parse_test_case_arg(argv[optind], &parsed_case) == 0) {
+        if (cli->suite_mode) {
+            fprintf(stderr, "Unexpected positional argument in suite mode: %s\n", argv[optind]);
+            return -1;
+        } else if (!cli->op_set && parse_test_case_arg(argv[optind], &parsed_case) == 0) {
             cli->op = parsed_case;
             cli->op_set = 1;
         } else if (strcmp(cli->config_file, "config.dat") == 0) {
@@ -453,6 +775,39 @@ static void apply_cli_overrides(Config *cfg, const CliOptions *cli) {
     if (cli->scenario_id[0] != '\0') {
         snprintf(cfg->scenario_id, sizeof(cfg->scenario_id), "%s", cli->scenario_id);
     }
+    detect_host_metadata(cfg);
+    load_git_commit_metadata(cfg);
+}
+
+static void apply_suite_scenario_overrides(Config *cfg, const CliOptions *cli, const SuiteScenario *scenario) {
+    char errbuf[128] = {0};
+    int scenario_case = 0;
+
+    if (parse_test_case_arg(scenario->op, &scenario_case) != 0) {
+        fprintf(stderr, "Invalid scenario op value: %s\n", scenario->op);
+        exit(1);
+    }
+
+    cfg->test_case = scenario_case;
+    cfg->use_mix_mode = (cfg->test_case == TEST_CASE_MIX && cfg->mix_op_count > 0) ? 1 : 0;
+    cfg->threads = scenario->threads;
+    if (parse_object_size_spec(scenario->object_size_spec, cfg, errbuf, sizeof(errbuf)) != 0) {
+        fprintf(stderr, "%s\n", errbuf);
+        exit(1);
+    }
+    if (scenario->run_seconds_set) {
+        cfg->run_seconds = scenario->run_seconds;
+    }
+    if (scenario->requests_per_thread_set) {
+        cfg->requests_per_thread = scenario->requests_per_thread;
+    }
+
+    snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", scenario->config_file);
+    if (!cfg->is_temporary_token) {
+        const char *users_path = scenario->users_file[0] ? scenario->users_file : cli->users_file;
+        snprintf(cfg->users_file_path, sizeof(cfg->users_file_path), "%s", users_path);
+    }
+    snprintf(cfg->scenario_id, sizeof(cfg->scenario_id), "%s", scenario->scenario_id);
     detect_host_metadata(cfg);
     load_git_commit_metadata(cfg);
 }
@@ -498,8 +853,8 @@ static void save_archive_csv(Config *cfg, const BenchmarkSummary *summary) {
     fp = fopen(filepath, "w");
     if (!fp) return;
 
-    fprintf(fp, "task_id,start_time,config_file,users_file,op,users_loaded,total_threads,threads_per_user_effective,object_size_spec,actual_duration_s,total_requests,success_requests,failed_requests,success_rate_pct,avg_cpu_pct,peak_cpu_pct,avg_rss_mb,peak_rss_mb,final_tps,peak_tps,final_bps_bytes_per_sec,peak_bps_bytes_per_sec,avg_latency_ms,p99_latency_ms,avg_single_stream_bps,max_single_stream_bps,scenario_id,git_commit,host_os,host_arch\n");
-    fprintf(fp, "%s,%s,%s,%s,%s,%d,%d,%.2f,%s,%.6f,%lld,%lld,%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s,%s,%s,%s\n",
+    fprintf(fp, "task_id,start_time,config_file,users_file,op,users_loaded,total_threads,threads_per_user_effective,object_size_spec,actual_duration_s,total_requests,success_requests,failed_requests,success_rate_pct,avg_cpu_pct,peak_cpu_pct,avg_single_core_cpu_pct,peak_single_core_cpu_pct,avg_rss_mb,peak_rss_mb,final_tps,peak_tps,final_bps_bytes_per_sec,peak_bps_bytes_per_sec,avg_latency_ms,p99_latency_ms,avg_single_stream_bps,max_single_stream_bps,scenario_id,git_commit,host_os,host_arch\n");
+    fprintf(fp, "%s,%s,%s,%s,%s,%d,%d,%.2f,%s,%.6f,%lld,%lld,%lld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s,%s,%s,%s\n",
             task_id_from_dir(cfg->report_task_dir),
             timebuf,
             cfg->config_file_path,
@@ -516,6 +871,8 @@ static void save_archive_csv(Config *cfg, const BenchmarkSummary *summary) {
             summary->success_rate_pct,
             summary->avg_cpu_pct,
             summary->peak_cpu_pct,
+            summary->avg_single_core_cpu_pct,
+            summary->peak_single_core_cpu_pct,
             summary->avg_rss_mb,
             summary->peak_rss_mb,
             summary->final_tps,
@@ -541,10 +898,37 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
     struct tm *t = localtime_r(&now, &t_res);
     double threads_per_user_effective = cfg->loaded_user_count > 0 ?
         (double)cfg->threads / cfg->loaded_user_count : 0.0;
+    char duration_human[64];
+    char object_size_human[64];
+    char object_size_min_human[64];
+    char object_size_max_human[64];
+    char part_size_human[64];
+    char final_bps_human[64];
+    char peak_bps_human[64];
+    char avg_single_stream_human[64];
+    char max_single_stream_human[64];
+    char avg_latency_human[64];
+    char p99_latency_human[64];
+    char avg_rss_human[64];
+    char peak_rss_human[64];
 
     snprintf(filepath, sizeof(filepath), "%s/brief.txt", cfg->report_task_dir);
     fp = fopen(filepath, "w");
     if (!fp) return;
+
+    format_duration_human(summary->actual_duration_s, duration_human, sizeof(duration_human));
+    format_bytes_si(cfg->object_size_max, object_size_human, sizeof(object_size_human));
+    format_bytes_si(cfg->object_size_min, object_size_min_human, sizeof(object_size_min_human));
+    format_bytes_si(cfg->object_size_max, object_size_max_human, sizeof(object_size_max_human));
+    format_bytes_si(cfg->part_size, part_size_human, sizeof(part_size_human));
+    format_rate_si(summary->final_bps, final_bps_human, sizeof(final_bps_human));
+    format_rate_si(summary->peak_bps, peak_bps_human, sizeof(peak_bps_human));
+    format_rate_si(summary->avg_single_stream_bps, avg_single_stream_human, sizeof(avg_single_stream_human));
+    format_rate_si(summary->max_single_stream_bps, max_single_stream_human, sizeof(max_single_stream_human));
+    format_latency_human(summary->avg_latency_ms, avg_latency_human, sizeof(avg_latency_human));
+    format_latency_human(summary->p99_latency_ms, p99_latency_human, sizeof(p99_latency_human));
+    format_memory_mb_human(summary->avg_rss_mb, avg_rss_human, sizeof(avg_rss_human));
+    format_memory_mb_human(summary->peak_rss_mb, peak_rss_human, sizeof(peak_rss_human));
 
     fprintf(fp, "===========================================\n");
     fprintf(fp, "      OBS C SDK Benchmark Execution Report \n");
@@ -589,11 +973,12 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
     fprintf(fp, "[ObjectSettings]\n");
     fprintf(fp, "  ObjectSizeSpec:    %s\n", cfg->object_size_spec);
     if (cfg->is_dynamic_size) {
-        fprintf(fp, "  ObjectSize:        %lld ~ %lld bytes (Dynamic)\n", cfg->object_size_min, cfg->object_size_max);
+        fprintf(fp, "  ObjectSize:        %s ~ %s (%lld ~ %lld Bytes, Dynamic)\n",
+                object_size_min_human, object_size_max_human, cfg->object_size_min, cfg->object_size_max);
     } else {
-        fprintf(fp, "  ObjectSize:        %lld bytes\n", cfg->object_size_max);
+        fprintf(fp, "  ObjectSize:        %s (%lld Bytes)\n", object_size_human, cfg->object_size_max);
     }
-    fprintf(fp, "  PartSize:          %lld bytes\n", cfg->part_size);
+    fprintf(fp, "  PartSize:          %s (%lld Bytes)\n", part_size_human, cfg->part_size);
     fprintf(fp, "  Parts/Upload:      %d\n", cfg->parts_for_each_upload_id);
     fprintf(fp, "  KeyPrefix:         %s\n", cfg->key_prefix);
     fprintf(fp, "  KeyHashPrefix:     %s\n", cfg->obj_name_pattern_hash ? "true" : "false");
@@ -617,46 +1002,40 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
     fprintf(fp, "  |- Internal Validation Fail: %lld\n", summary->fail_validation);
 
     fprintf(fp, "\nPerformance:\n");
-    fprintf(fp, "  Actual Duration:      %.4f s\n", summary->actual_duration_s);
+    fprintf(fp, "  Actual Duration:      %s (%.4f s)\n", duration_human, summary->actual_duration_s);
     fprintf(fp, "  Success Rate:         %.4f %%\n", summary->success_rate_pct);
     fprintf(fp, "  Final TPS:            %.4f\n", summary->final_tps);
     fprintf(fp, "  Peak TPS:             %.4f\n", summary->peak_tps);
-    fprintf(fp, "  Final BPS:            %.4f Bytes/s\n", summary->final_bps);
-    fprintf(fp, "  Peak BPS:             %.4f Bytes/s\n", summary->peak_bps);
-    fprintf(fp, "  Avg Latency:          %.4f ms\n", summary->avg_latency_ms);
-    fprintf(fp, "  P99 Latency:          %.4f ms\n", summary->p99_latency_ms);
-    fprintf(fp, "  Avg Single Stream:    %.4f Bytes/s\n", summary->avg_single_stream_bps);
-    fprintf(fp, "  Max Single Stream:    %.4f Bytes/s\n", summary->max_single_stream_bps);
+    fprintf(fp, "  Final BPS:            %s (%.4f Bytes/s)\n", final_bps_human, summary->final_bps);
+    fprintf(fp, "  Peak BPS:             %s (%.4f Bytes/s)\n", peak_bps_human, summary->peak_bps);
+    fprintf(fp, "  Avg Latency:          %s (%.4f ms)\n", avg_latency_human, summary->avg_latency_ms);
+    fprintf(fp, "  P99 Latency:          %s (%.4f ms)\n", p99_latency_human, summary->p99_latency_ms);
+    fprintf(fp, "  Avg Single Stream:    %s (%.4f Bytes/s)\n", avg_single_stream_human, summary->avg_single_stream_bps);
+    fprintf(fp, "  Max Single Stream:    %s (%.4f Bytes/s)\n", max_single_stream_human, summary->max_single_stream_bps);
     fprintf(fp, "  Avg CPU:              %.4f %%\n", summary->avg_cpu_pct);
     fprintf(fp, "  Peak CPU:             %.4f %%\n", summary->peak_cpu_pct);
-    fprintf(fp, "  Avg RSS:              %.4f MB\n", summary->avg_rss_mb);
-    fprintf(fp, "  Peak RSS:             %.4f MB\n", summary->peak_rss_mb);
+    fprintf(fp, "  Avg Single-Core CPU:  %.4f %%\n", summary->avg_single_core_cpu_pct);
+    fprintf(fp, "  Peak Single-Core CPU: %.4f %%\n", summary->peak_single_core_cpu_pct);
+    fprintf(fp, "  Avg RSS:              %s (%.4f MB)\n", avg_rss_human, summary->avg_rss_mb);
+    fprintf(fp, "  Peak RSS:             %s (%.4f MB)\n", peak_rss_human, summary->peak_rss_mb);
     fprintf(fp, "===========================================\n");
 
     fclose(fp);
     LOG_INFO("Execution report saved to: %s", filepath);
 }
 
-static void print_usage(const char *prog) {
-    fprintf(stderr,
-            "Usage: %s [config.dat|testcase] [--config FILE] [--users FILE] [--op OP] [--threads N] [--object-size SPEC] [--output-dir DIR] [--log-dir DIR]\n",
-            prog);
-    fprintf(stderr, "       %s [--scenario-id ID]\n", prog);
-}
-
-int main(int argc, char **argv) {
+static int run_benchmark_scenario(const CliOptions *cli,
+                                  const SuiteScenario *scenario,
+                                  const char *report_dir,
+                                  const char *log_dir,
+                                  ScenarioRunResult *result) {
     Config cfg;
-    CliOptions cli;
     pthread_t *tids = NULL;
     WorkerArgs *t_args = NULL;
     pthread_t monitor_tid;
     MonitorArgs m_args;
     BenchmarkSummary summary;
     struct timeval main_start_tv, main_end_tv;
-    time_t now = time(NULL);
-    struct tm t_res;
-    struct tm *t = localtime_r(&now, &t_res);
-    char task_id[64];
     double current_ms = 0.0;
     double stop_ms = 0.0;
     obs_status status;
@@ -667,18 +1046,16 @@ int main(int argc, char **argv) {
     int single_stream_count = 0;
     int global_thread_idx = 0;
     int u;
+    int exit_code = 1;
+    int obs_initialized = 0;
+    const char *config_path = scenario ? scenario->config_file : cli->config_file;
 
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, handle_sigint);
-
-    if (parse_cli_options(argc, argv, &cli) != 0) {
-        print_usage(argv[0]);
-        return 1;
-    }
-
-    if (ensure_directory("upload_checkpoint") != 0) {
-        fprintf(stderr, "Failed to create upload_checkpoint directory\n");
-        return 1;
+    if (result) {
+        memset(result, 0, sizeof(*result));
+        result->exit_status = 1;
+        result->longrun_exit_status = 0;
+        snprintf(result->report_dir, sizeof(result->report_dir), "%s", report_dir);
+        snprintf(result->log_dir, sizeof(result->log_dir), "%s", log_dir);
     }
 
     initialize_break_point_lock();
@@ -686,25 +1063,19 @@ int main(int argc, char **argv) {
     memset(&summary, 0, sizeof(summary));
     memset(&m_args, 0, sizeof(m_args));
 
-    if (t) {
-        snprintf(task_id, sizeof(task_id), "task_%04d%02d%02d_%02d%02d%02d",
-                 t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-                 t->tm_hour, t->tm_min, t->tm_sec);
-    } else {
-        snprintf(task_id, sizeof(task_id), "task_UNKNOWN");
-    }
-    if (load_config(cli.config_file, &cfg) != 0) return 1;
-    apply_cli_overrides(&cfg, &cli);
+    if (load_config(config_path, &cfg) != 0) goto cleanup;
+    if (scenario) apply_suite_scenario_overrides(&cfg, cli, scenario);
+    else apply_cli_overrides(&cfg, cli);
 
-    snprintf(cfg.report_task_dir, sizeof(cfg.report_task_dir), "%s/%s", cli.output_dir, task_id);
-    snprintf(cfg.log_task_dir, sizeof(cfg.log_task_dir), "%s/%s", cli.log_dir, task_id);
-    if (ensure_directory(cli.output_dir) != 0 || ensure_directory(cfg.report_task_dir) != 0) {
+    snprintf(cfg.report_task_dir, sizeof(cfg.report_task_dir), "%s", report_dir);
+    snprintf(cfg.log_task_dir, sizeof(cfg.log_task_dir), "%s", log_dir);
+    if (ensure_directory(cfg.report_task_dir) != 0) {
         fprintf(stderr, "Failed to create report output directory: %s\n", cfg.report_task_dir);
-        return 1;
+        goto cleanup;
     }
-    if (ensure_directory(cli.log_dir) != 0 || ensure_directory(cfg.log_task_dir) != 0) {
+    if (ensure_directory(cfg.log_task_dir) != 0) {
         fprintf(stderr, "Failed to create log output directory: %s\n", cfg.log_task_dir);
-        return 1;
+        goto cleanup;
     }
 
     log_init(cfg.log_level);
@@ -714,34 +1085,37 @@ int main(int argc, char **argv) {
 
     if (cfg.test_case == TEST_CASE_MULTIPART && cfg.parts_for_each_upload_id <= 0) {
         LOG_ERROR("FATAL: TestCase 216 (Multipart Upload) requires 'PartsForEachUploadID' to be explicitly set in config.dat (valid range: 1~10000).");
-        return 1;
+        goto cleanup;
     }
 
     if (cfg.is_temporary_token) {
-        char cmd[256];
+        char cmd[PATH_MAX * 2];
         LOG_INFO("IsTemporaryToken enabled. Fetching STS tokens for %d users...", cfg.target_user_count);
         snprintf(cmd, sizeof(cmd), "python3 scripts/sdk/generate_temp_ak_sk.py %d", cfg.target_user_count);
-        if (system(cmd) != 0) {
+        if (run_command_status(cmd) != 0) {
             LOG_ERROR("FATAL: Failed to generate temporary credentials. (Command: %s)", cmd);
-            return 1;
+            goto cleanup;
         }
         snprintf(cfg.users_file_path, sizeof(cfg.users_file_path), "%s", "temptoken.dat");
-        if (load_users_file(cfg.users_file_path, &cfg, 1) < 0) return 1;
+        if (load_users_file(cfg.users_file_path, &cfg, 1) < 0) goto cleanup;
     } else {
-        snprintf(cfg.users_file_path, sizeof(cfg.users_file_path), "%s", cli.users_file);
-        if (load_users_file(cfg.users_file_path, &cfg, 0) < 0) return 1;
+        const char *users_path = scenario && scenario->users_file[0] ? scenario->users_file : cli->users_file;
+        snprintf(cfg.users_file_path, sizeof(cfg.users_file_path), "%s", users_path);
+        if (load_users_file(cfg.users_file_path, &cfg, 0) < 0) goto cleanup;
     }
 
     if (cfg.loaded_user_count <= 0) {
         LOG_ERROR("No users loaded from %s", cfg.users_file_path);
-        return 1;
+        goto cleanup;
     }
 
-    if (!cli.threads_set) {
+    if (scenario) {
+        cfg.threads = scenario->threads;
+    } else if (!cli->threads_set) {
         if (cfg.threads_per_user <= 0) cfg.threads_per_user = 1;
         cfg.threads = cfg.loaded_user_count * cfg.threads_per_user;
     } else {
-        cfg.threads = cli.threads;
+        cfg.threads = cli->threads;
     }
     if (cfg.scenario_id[0] == '\0') {
         infer_scenario_id(&cfg, cfg.scenario_id, sizeof(cfg.scenario_id));
@@ -750,11 +1124,13 @@ int main(int argc, char **argv) {
     printf("[Config] Multi-User Mode: %d Users Loaded. Total Threads: %d\n", cfg.loaded_user_count, cfg.threads);
     printf("[Config] Operation: %s (%d)\n", test_case_to_name(cfg.test_case), cfg.test_case);
     printf("[Config] ObjectSize: %s\n", cfg.object_size_spec);
+    if (scenario) printf("[Config] Suite Scenario: %s (%s)\n", scenario->scenario_id, scenario->profile);
     if (cfg.enable_data_validation) printf("[Config] Data Validation: ENABLED\n");
     if (cfg.enable_detail_log) printf("[Config] Detail Request Log: ENABLED\n");
 
     status = obs_initialize(OBS_INIT_ALL);
-    if (status != OBS_STATUS_OK) return -1;
+    if (status != OBS_STATUS_OK) goto cleanup;
+    obs_initialized = 1;
 
     {
         struct timespec ts_now;
@@ -767,11 +1143,7 @@ int main(int argc, char **argv) {
     t_args = (WorkerArgs *)calloc(cfg.threads, sizeof(WorkerArgs));
     if (!tids || !t_args) {
         LOG_ERROR("Failed to allocate thread resources");
-        free(tids);
-        free(t_args);
-        obs_deinitialize();
-        deinitialize_break_point_lock();
-        return 1;
+        goto cleanup;
     }
 
     gettimeofday(&main_start_tv, NULL);
@@ -800,7 +1172,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (cli.threads_set) {
+        if (scenario || cli->threads_set) {
             int base_threads = cfg.threads / cfg.loaded_user_count;
             int remainder = cfg.threads % cfg.loaded_user_count;
             threads_for_user = base_threads + (u < remainder ? 1 : 0);
@@ -891,6 +1263,10 @@ int main(int argc, char **argv) {
     summary.peak_bps = m_args.peak_bps;
     summary.avg_cpu_pct = m_args.cpu_sample_count > 0 ? m_args.cpu_sum_pct / m_args.cpu_sample_count : -1.0;
     summary.peak_cpu_pct = m_args.cpu_sample_count > 0 ? m_args.cpu_peak_pct : -1.0;
+    summary.avg_single_core_cpu_pct = m_args.single_core_cpu_sample_count > 0 ?
+        m_args.single_core_cpu_sum_pct / m_args.single_core_cpu_sample_count : -1.0;
+    summary.peak_single_core_cpu_pct = m_args.single_core_cpu_sample_count > 0 ?
+        m_args.single_core_cpu_peak_pct : -1.0;
     summary.avg_rss_mb = m_args.rss_sample_count > 0 ? m_args.rss_sum_mb / m_args.rss_sample_count : -1.0;
     summary.peak_rss_mb = m_args.rss_sample_count > 0 ? m_args.rss_peak_mb : -1.0;
     summary.avg_latency_ms = total_latency_samples > 0 ? summary.avg_latency_ms / total_latency_samples : 0.0;
@@ -919,6 +1295,8 @@ int main(int argc, char **argv) {
     printf("Latency P99:     %.4f ms\n", summary.p99_latency_ms);
     printf("Avg CPU:         %.4f %%\n", summary.avg_cpu_pct);
     printf("Peak CPU:        %.4f %%\n", summary.peak_cpu_pct);
+    printf("Avg SingleCore:  %.4f %%\n", summary.avg_single_core_cpu_pct);
+    printf("Peak SingleCore: %.4f %%\n", summary.peak_single_core_cpu_pct);
     printf("Avg RSS:         %.4f MB\n", summary.avg_rss_mb);
     printf("Peak RSS:        %.4f MB\n", summary.peak_rss_mb);
     printf("Avg SingleFlow:  %.4f Bytes/s\n", summary.avg_single_stream_bps);
@@ -926,22 +1304,298 @@ int main(int argc, char **argv) {
 
     save_benchmark_report(&cfg, &summary);
     save_archive_csv(&cfg, &summary);
+    exit_code = 0;
 
-    free(tids);
-    free(t_args);
-
-    if (cfg.user_list) {
-        free(cfg.user_list);
-        cfg.user_list = NULL;
+cleanup:
+    if (obs_initialized) {
+        obs_deinitialize();
     }
-    for (u = 0; u < cfg.range_count; u++) {
-        if (cfg.range_options[u]) {
-            free(cfg.range_options[u]);
-            cfg.range_options[u] = NULL;
-        }
-    }
-
-    obs_deinitialize();
+    if (tids) free(tids);
+    if (t_args) free(t_args);
+    cleanup_config_resources(&cfg);
     deinitialize_break_point_lock();
+    if (result) result->exit_status = exit_code;
+    return exit_code;
+}
+
+static int write_suite_result_header(const char *path) {
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    fprintf(fp, "suite_id\trun_id\tscenario_id\tprofile\tconfig_file\tusers_file\top\tthreads\tobject_size_spec\treport_dir\tlog_dir\texit_status\tlongrun_exit_status\tbaseline_exit_status\tbaseline_mode\n");
+    fclose(fp);
     return 0;
+}
+
+static int append_suite_result(const char *path,
+                               const char *run_id,
+                               const SuiteScenario *scenario,
+                               const ScenarioRunResult *result) {
+    FILE *fp = fopen(path, "a");
+    if (!fp) return -1;
+    fprintf(fp, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+            scenario->suite_id,
+            run_id,
+            scenario->scenario_id,
+            scenario->profile,
+            scenario->config_file,
+            scenario->users_file,
+            scenario->op,
+            scenario->threads,
+            scenario->object_size_spec,
+            result->report_dir,
+            result->log_dir,
+            result->exit_status,
+            result->longrun_exit_status,
+            result->baseline_exit_status,
+            scenario->baseline_mode);
+    fclose(fp);
+    return 0;
+}
+
+static int run_longrun_analysis(const SuiteScenario *scenario, const ScenarioRunResult *result) {
+    char cmd[PATH_MAX * 4];
+    char realtime_path[PATH_MAX];
+    char archive_path[PATH_MAX];
+
+    snprintf(realtime_path, sizeof(realtime_path), "%s/realtime.txt", result->log_dir);
+    snprintf(archive_path, sizeof(archive_path), "%s/archive.csv", result->report_dir);
+    if (access(realtime_path, F_OK) != 0 || access(archive_path, F_OK) != 0) {
+        return 2;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "python3 scripts/reporting/analyze_longrun.py --realtime \"%s\" --archive \"%s\" --output-dir \"%s\" --policy \"%s\"%s",
+             realtime_path,
+             archive_path,
+             result->report_dir,
+             scenario->longrun_policy[0] ? scenario->longrun_policy : "ci/perf/longrun_policy.yaml",
+             scenario->gate_longrun ? " --gate" : "");
+    return run_command_status(cmd);
+}
+
+static int run_perf_baseline_action(const SuiteScenario *scenario, const ScenarioRunResult *result, const char *run_id) {
+    char cmd[PATH_MAX * 6];
+    char archive_path[PATH_MAX];
+    char perf_dir[PATH_MAX];
+
+    snprintf(archive_path, sizeof(archive_path), "%s/archive.csv", result->report_dir);
+    if (access(archive_path, F_OK) != 0) {
+        return 2;
+    }
+    if (!scenario->baseline_enabled || scenario->baseline_mode[0] == '\0' || strcmp(scenario->baseline_mode, "off") == 0) {
+        return 0;
+    }
+
+    snprintf(perf_dir, sizeof(perf_dir), "%s/perf_gate", result->report_dir);
+    if (strcmp(scenario->baseline_mode, "generate") == 0) {
+        snprintf(cmd, sizeof(cmd),
+                 "python3 scripts/reporting/register_baseline.py --archive \"%s\" --manifest \"%s\" --store-dir \"%s\" --label \"%s\" --update-strategy \"%s\" --source-run \"%s\"",
+                 archive_path,
+                 scenario->baseline_manifest,
+                 scenario->baseline_store_dir,
+                 scenario->scenario_id,
+                 scenario->baseline_update_strategy[0] ? scenario->baseline_update_strategy : "new_label",
+                 run_id ? run_id : "");
+        return run_command_status(cmd);
+    }
+    if (strcmp(scenario->baseline_mode, "compare") == 0) {
+        snprintf(cmd, sizeof(cmd),
+                 "python3 scripts/reporting/perf_gate.py --candidate \"%s\" --policy \"%s\" --baselines-manifest \"%s\" --scenario-id \"%s\" --output-dir \"%s\"",
+                 archive_path,
+                 scenario->baseline_policy[0] ? scenario->baseline_policy : "ci/perf/gate_policy.json",
+                 scenario->baseline_manifest,
+                 scenario->scenario_id,
+                 perf_dir);
+        return run_command_status(cmd);
+    }
+    return 2;
+}
+
+static int run_suite_mode(const CliOptions *cli) {
+    char suite_id[128];
+    char run_id[64];
+    char suite_report_root[PATH_MAX];
+    char suite_log_root[PATH_MAX];
+    char summary_dir[PATH_MAX];
+    char resolved_tsv[PATH_MAX];
+    char resolved_yaml[PATH_MAX];
+    char results_tsv[PATH_MAX];
+    char cmd[PATH_MAX * 4];
+    SuiteScenario *scenarios = NULL;
+    int scenario_count = 0;
+    int i;
+    int overall_exit = 0;
+
+    printf("[Suite] Execution model: single process, sequential scenarios\n");
+
+    if (run_capture_first_line(
+            (snprintf(cmd, sizeof(cmd),
+                      "python3 scripts/suites/resolve_suite.py --suite \"%s\" --print-suite-id",
+                      cli->suite_file), cmd),
+            suite_id,
+            sizeof(suite_id)) != 0) {
+        fprintf(stderr, "Failed to resolve suite id from %s\n", cli->suite_file);
+        return 2;
+    }
+
+    printf("[Suite] Suite start: %s\n", suite_id);
+    make_timestamp_id("run", run_id, sizeof(run_id));
+    snprintf(suite_report_root, sizeof(suite_report_root), "%s/%s/%s", cli->output_dir, suite_id, run_id);
+    snprintf(suite_log_root, sizeof(suite_log_root), "%s/%s/%s", cli->log_dir, suite_id, run_id);
+    snprintf(summary_dir, sizeof(summary_dir), "%s/summary", suite_report_root);
+    snprintf(resolved_tsv, sizeof(resolved_tsv), "%s/resolved_scenarios.tsv", summary_dir);
+    snprintf(resolved_yaml, sizeof(resolved_yaml), "%s/suite_manifest_resolved.yaml", summary_dir);
+    snprintf(results_tsv, sizeof(results_tsv), "%s/scenario_results.tsv", summary_dir);
+
+    if (ensure_directory(summary_dir) != 0 || ensure_directory(suite_log_root) != 0) {
+        fprintf(stderr, "Failed to create suite output directories.\n");
+        return 2;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "python3 scripts/suites/resolve_suite.py --suite \"%s\" --resolved-tsv \"%s\" --resolved-yaml \"%s\" --default-users \"%s\"",
+             cli->suite_file,
+             resolved_tsv,
+             resolved_yaml,
+             cli->users_file);
+    if (run_command_status(cmd) != 0) {
+        fprintf(stderr, "Failed to resolve suite manifest: %s\n", cli->suite_file);
+        return 2;
+    }
+
+    if (load_suite_scenarios(resolved_tsv, &scenarios, &scenario_count) != 0 || scenario_count <= 0) {
+        fprintf(stderr, "Failed to load resolved scenarios from %s\n", resolved_tsv);
+        free(scenarios);
+        return 2;
+    }
+    if (write_suite_result_header(results_tsv) != 0) {
+        fprintf(stderr, "Failed to create suite results manifest: %s\n", results_tsv);
+        free(scenarios);
+        return 2;
+    }
+
+    for (i = 0; i < scenario_count; i++) {
+        ScenarioRunResult result;
+        char scenario_report_dir[PATH_MAX];
+        char scenario_log_dir[PATH_MAX];
+
+        snprintf(scenario_report_dir, sizeof(scenario_report_dir), "%s/scenarios/%s", suite_report_root, scenarios[i].scenario_id);
+        snprintf(scenario_log_dir, sizeof(scenario_log_dir), "%s/scenarios/%s", suite_log_root, scenarios[i].scenario_id);
+
+        printf("\n=== Suite Scenario [%d/%d]: %s (%s) ===\n",
+               i + 1, scenario_count, scenarios[i].scenario_id, scenarios[i].profile);
+        printf("[Suite] Scenario start: %s (%s)\n", scenarios[i].scenario_id, scenarios[i].profile);
+
+        memset(&result, 0, sizeof(result));
+        result.exit_status = run_benchmark_scenario(cli, &scenarios[i], scenario_report_dir, scenario_log_dir, &result);
+        if (result.exit_status == 0) {
+            result.baseline_exit_status = run_perf_baseline_action(&scenarios[i], &result, run_id);
+        }
+        if (result.exit_status == 0 && scenarios[i].analyze_longrun) {
+            result.longrun_exit_status = run_longrun_analysis(&scenarios[i], &result);
+        }
+        append_suite_result(results_tsv, run_id, &scenarios[i], &result);
+
+        {
+            const char *baseline_status = "SKIP";
+            const char *longrun_status = "SKIP";
+            const char *scenario_status = "PASS";
+
+            if (result.exit_status == 0 && scenarios[i].baseline_enabled) {
+                char gate_result_path[PATH_MAX];
+                snprintf(gate_result_path, sizeof(gate_result_path), "%s/perf_gate/gate_result.json", result.report_dir);
+                if (strcmp(scenarios[i].baseline_mode, "generate") == 0 && result.baseline_exit_status == 0) {
+                    baseline_status = "UPDATED";
+                } else if (strcmp(scenarios[i].baseline_mode, "compare") == 0) {
+                    if (result.baseline_exit_status != 0) {
+                        baseline_status = "FAIL";
+                    } else if (file_contains_text(gate_result_path, "\"warned_metrics\": []")) {
+                        baseline_status = "PASS";
+                    } else if (file_contains_text(gate_result_path, "\"warned_metrics\": [")) {
+                        baseline_status = "WARN";
+                    } else {
+                        baseline_status = "PASS";
+                    }
+                } else if (result.baseline_exit_status != 0) {
+                    baseline_status = "FAIL";
+                }
+            }
+            if (scenarios[i].analyze_longrun) {
+                char longrun_summary_path[PATH_MAX];
+                snprintf(longrun_summary_path, sizeof(longrun_summary_path), "%s/longrun_summary.json", result.report_dir);
+                if (result.longrun_exit_status == 1) longrun_status = "FAIL";
+                else if (file_contains_text(longrun_summary_path, "\"longrun_status\": \"WARN\"")) longrun_status = "WARN";
+                else if (file_contains_text(longrun_summary_path, "\"longrun_status\": \"PASS\"")) longrun_status = "PASS";
+            }
+            if (result.exit_status != 0 || result.baseline_exit_status == 1 || result.baseline_exit_status == 2 || result.longrun_exit_status == 1) {
+                scenario_status = "FAIL";
+            } else if (strcmp(baseline_status, "WARN") == 0 || strcmp(longrun_status, "WARN") == 0) {
+                scenario_status = "WARN";
+            }
+
+            printf("[Suite] Scenario final: %s\n", scenario_status);
+            printf("[Suite] Baseline: %s\n", baseline_status);
+            printf("[Suite] Longrun: %s\n", longrun_status);
+        }
+
+        if (result.exit_status == 2 || result.longrun_exit_status == 2 || result.baseline_exit_status == 2) overall_exit = 2;
+        else if ((result.exit_status != 0 || result.longrun_exit_status == 1 || result.baseline_exit_status == 1) && overall_exit == 0) overall_exit = 1;
+
+        if ((result.exit_status != 0 || result.longrun_exit_status != 0 || result.baseline_exit_status != 0) && !scenarios[i].continue_on_fail) {
+            printf("[Suite] Stopping after scenario failure: %s\n", scenarios[i].scenario_id);
+            break;
+        }
+        if (g_graceful_stop) break;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "python3 scripts/reporting/generate_suite_summary.py --suite-yaml \"%s\" --scenario-results \"%s\" --output-dir \"%s\"",
+             resolved_yaml,
+             results_tsv,
+             summary_dir);
+    if (run_command_status(cmd) != 0 && overall_exit == 0) {
+        overall_exit = 2;
+    }
+
+    free(scenarios);
+    return overall_exit;
+}
+
+static void print_usage(const char *prog) {
+    fprintf(stderr,
+            "Usage: %s [config.dat|testcase] [--config FILE] [--users FILE] [--op OP] [--threads N] [--object-size SPEC] [--output-dir DIR] [--log-dir DIR]\n",
+            prog);
+    fprintf(stderr, "       %s [--scenario-id ID]\n", prog);
+    fprintf(stderr, "       %s [--suite FILE]\n", prog);
+}
+
+int main(int argc, char **argv) {
+    CliOptions cli;
+    char task_id[64];
+    char report_dir[PATH_MAX];
+    char log_dir[PATH_MAX];
+    int ret;
+
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, handle_sigint);
+
+    if (parse_cli_options(argc, argv, &cli) != 0) {
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    if (ensure_directory("upload_checkpoint") != 0) {
+        fprintf(stderr, "Failed to create upload_checkpoint directory\n");
+        return 1;
+    }
+
+    if (cli.suite_mode) {
+        return run_suite_mode(&cli);
+    }
+
+    make_timestamp_id("task", task_id, sizeof(task_id));
+    snprintf(report_dir, sizeof(report_dir), "%s/%s", cli.output_dir, task_id);
+    snprintf(log_dir, sizeof(log_dir), "%s/%s", cli.log_dir, task_id);
+    ret = run_benchmark_scenario(&cli, NULL, report_dir, log_dir, NULL);
+    return ret;
 }

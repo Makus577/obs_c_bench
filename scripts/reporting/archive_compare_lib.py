@@ -25,6 +25,7 @@ DEFAULT_METRIC_SPECS = {
     "final_tps": {
         "label": "Final TPS",
         "direction": "higher",
+        "unit_kind": "tps",
         "enabled": True,
         "warn_threshold_pct": 3.0,
         "fail_threshold_pct": 5.0,
@@ -32,6 +33,7 @@ DEFAULT_METRIC_SPECS = {
     "final_bps_bytes_per_sec": {
         "label": "Final BPS",
         "direction": "higher",
+        "unit_kind": "rate",
         "enabled": True,
         "warn_threshold_pct": 3.0,
         "fail_threshold_pct": 5.0,
@@ -39,6 +41,7 @@ DEFAULT_METRIC_SPECS = {
     "avg_latency_ms": {
         "label": "Avg Latency",
         "direction": "lower",
+        "unit_kind": "latency_ms",
         "enabled": True,
         "warn_threshold_pct": 5.0,
         "fail_threshold_pct": 8.0,
@@ -46,6 +49,7 @@ DEFAULT_METRIC_SPECS = {
     "p99_latency_ms": {
         "label": "P99 Latency",
         "direction": "lower",
+        "unit_kind": "latency_ms",
         "enabled": True,
         "warn_threshold_pct": 7.0,
         "fail_threshold_pct": 10.0,
@@ -53,13 +57,23 @@ DEFAULT_METRIC_SPECS = {
     "avg_cpu_pct": {
         "label": "Avg CPU",
         "direction": "lower",
+        "unit_kind": "percent",
         "enabled": True,
+        "warn_threshold_pct": 7.0,
+        "fail_threshold_pct": 10.0,
+    },
+    "avg_single_core_cpu_pct": {
+        "label": "Avg Single-Core CPU",
+        "direction": "lower",
+        "unit_kind": "percent",
+        "enabled": False,
         "warn_threshold_pct": 7.0,
         "fail_threshold_pct": 10.0,
     },
     "success_rate_pct": {
         "label": "Success Rate",
         "direction": "higher",
+        "unit_kind": "percent",
         "enabled": True,
         "warn_threshold_pct": 0.5,
         "fail_threshold_pct": 1.0,
@@ -69,6 +83,7 @@ DEFAULT_METRIC_SPECS = {
     "failed_requests": {
         "label": "Failed Requests",
         "direction": "lower",
+        "unit_kind": "count",
         "enabled": True,
         "warn_threshold_pct": 10.0,
         "fail_threshold_pct": 20.0,
@@ -78,6 +93,7 @@ DEFAULT_METRIC_SPECS = {
     "peak_tps": {
         "label": "Peak TPS",
         "direction": "higher",
+        "unit_kind": "tps",
         "enabled": True,
         "warn_threshold_pct": 5.0,
         "fail_threshold_pct": 8.0,
@@ -85,6 +101,7 @@ DEFAULT_METRIC_SPECS = {
     "peak_bps_bytes_per_sec": {
         "label": "Peak BPS",
         "direction": "higher",
+        "unit_kind": "rate",
         "enabled": True,
         "warn_threshold_pct": 5.0,
         "fail_threshold_pct": 8.0,
@@ -92,13 +109,23 @@ DEFAULT_METRIC_SPECS = {
     "peak_cpu_pct": {
         "label": "Peak CPU",
         "direction": "lower",
+        "unit_kind": "percent",
         "enabled": True,
+        "warn_threshold_pct": 8.0,
+        "fail_threshold_pct": 12.0,
+    },
+    "peak_single_core_cpu_pct": {
+        "label": "Peak Single-Core CPU",
+        "direction": "lower",
+        "unit_kind": "percent",
+        "enabled": False,
         "warn_threshold_pct": 8.0,
         "fail_threshold_pct": 12.0,
     },
     "avg_rss_mb": {
         "label": "Avg RSS",
         "direction": "lower",
+        "unit_kind": "memory_mb",
         "enabled": True,
         "warn_threshold_pct": 8.0,
         "fail_threshold_pct": 12.0,
@@ -106,6 +133,7 @@ DEFAULT_METRIC_SPECS = {
     "peak_rss_mb": {
         "label": "Peak RSS",
         "direction": "lower",
+        "unit_kind": "memory_mb",
         "enabled": True,
         "warn_threshold_pct": 8.0,
         "fail_threshold_pct": 12.0,
@@ -113,6 +141,7 @@ DEFAULT_METRIC_SPECS = {
     "avg_single_stream_bps": {
         "label": "Avg Single Stream",
         "direction": "higher",
+        "unit_kind": "rate",
         "enabled": True,
         "warn_threshold_pct": 4.0,
         "fail_threshold_pct": 6.0,
@@ -120,6 +149,7 @@ DEFAULT_METRIC_SPECS = {
     "max_single_stream_bps": {
         "label": "Max Single Stream",
         "direction": "higher",
+        "unit_kind": "rate",
         "enabled": True,
         "warn_threshold_pct": 5.0,
         "fail_threshold_pct": 8.0,
@@ -177,6 +207,83 @@ def format_metric_value(value):
     if abs(value) >= 1000:
         return f"{value:.4f}"
     return f"{value:.4f}"
+
+
+def humanize_rate(value):
+    if value is None:
+        return "N/A"
+    units = ["Bytes/s", "KB/s", "MB/s", "GB/s", "TB/s"]
+    scaled = float(value)
+    idx = 0
+    while abs(scaled) >= 1000.0 and idx < len(units) - 1:
+        scaled /= 1000.0
+        idx += 1
+    return f"{scaled:.2f} {units[idx]}"
+
+
+def humanize_bytes(value):
+    if value is None:
+        return "N/A"
+    units = ["Bytes", "KB", "MB", "GB", "TB"]
+    scaled = float(value)
+    idx = 0
+    while abs(scaled) >= 1000.0 and idx < len(units) - 1:
+        scaled /= 1000.0
+        idx += 1
+    if idx == 0:
+        return f"{int(value)} {units[idx]}"
+    return f"{scaled:.2f} {units[idx]}"
+
+
+def humanize_memory_mb(value):
+    if value is None:
+        return "N/A"
+    if abs(value) >= 1000.0:
+        return f"{value / 1000.0:.2f} GB"
+    return f"{value:.2f} MB"
+
+
+def humanize_latency_ms(value):
+    if value is None:
+        return "N/A"
+    if abs(value) >= 1000.0:
+        return f"{value / 1000.0:.2f} s"
+    return f"{value:.2f} ms"
+
+
+def humanize_duration_s(value):
+    if value is None:
+        return "N/A"
+    total = int(round(float(value)))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
+    if hours > 0:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes > 0:
+        return f"{minutes}m {seconds}s"
+    return f"{float(value):.2f} s"
+
+
+def format_human_metric(metric_name, value, unit_kind=None):
+    if value is None:
+        return "N/A"
+    kind = unit_kind or DEFAULT_METRIC_SPECS.get(metric_name, {}).get("unit_kind", "")
+    if kind == "rate":
+        return humanize_rate(value)
+    if kind == "memory_mb":
+        return humanize_memory_mb(value)
+    if kind == "latency_ms":
+        return humanize_latency_ms(value)
+    if kind == "duration_s":
+        return humanize_duration_s(value)
+    if kind == "percent":
+        return f"{value:.2f}%"
+    if kind == "tps":
+        return f"{value:.2f}"
+    if kind == "count":
+        return f"{int(value)}"
+    return format_metric_value(value)
 
 
 def compute_relative_diff_pct(baseline_value, candidate_value):
@@ -339,13 +446,14 @@ def render_metric_table(rows):
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
-        abs_diff = "N/A" if row["absolute_diff"] is None else f"{row['absolute_diff']:.4f}"
+        unit_kind = DEFAULT_METRIC_SPECS.get(row["metric"], {}).get("unit_kind")
+        abs_diff = "N/A" if row["absolute_diff"] is None else format_human_metric(row["metric"], row["absolute_diff"], unit_kind)
         rel_diff = "N/A" if row["relative_diff_pct"] is None else f"{row['relative_diff_pct']:.2f}%"
         status = row.get("gate_status") or row["status"]
         reason = row["reason"] or ""
         lines.append(
-            f"| {row['label']} | {row['direction']} | {format_metric_value(row['baseline_value'])} | "
-            f"{format_metric_value(row['candidate_value'])} | {abs_diff} | {rel_diff} | "
+            f"| {row['label']} | {row['direction']} | {format_human_metric(row['metric'], row['baseline_value'], unit_kind)} | "
+            f"{format_human_metric(row['metric'], row['candidate_value'], unit_kind)} | {abs_diff} | {rel_diff} | "
             f"{row['trend']} | {status} | {reason} |"
         )
     return "\n".join(lines)
