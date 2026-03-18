@@ -128,6 +128,8 @@ typedef struct {
     int enable_data_validation;
     int enable_detail_log;      
     int resumable_task_num;     
+    int analyze_longrun;
+    int gate_longrun;
     char report_task_dir[PATH_MAX];
     char log_task_dir[PATH_MAX];
     char config_file_path[PATH_MAX];

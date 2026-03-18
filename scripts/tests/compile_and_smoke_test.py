@@ -135,7 +135,7 @@ class BenchmarkTester:
             shutil.move(USERS_BAK, USERS_FILE)
         elif self.created_users and os.path.exists(USERS_FILE):
             os.remove(USERS_FILE)
-        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out', 'test_suite_reports', 'test_suite_logs', 'test_auto_baseline']:
+        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out', 'test_suite_reports', 'test_suite_logs', 'test_auto_baseline', 'test_longrun_runtime']:
             extra_path = os.path.join(self.work_dir, extra_dir)
             if os.path.exists(extra_path):
                 shutil.rmtree(extra_path)
@@ -489,6 +489,7 @@ scenarios:
     op: download
     threads: 1
     object_size: 512KB
+    run_seconds: 2
     analyze_longrun: true
 gates:
   longrun:
@@ -552,9 +553,19 @@ reporting:
         if "avg_single_core_cpu_pct" not in summary_text or "peak_single_core_cpu_pct" not in summary_text:
             print("[FAIL] suite_summary.csv missing single-core CPU columns.")
             return False
+        if "run_seconds" not in summary_text or "analyze_longrun" not in summary_text or "gate_longrun" not in summary_text:
+            print("[FAIL] suite_summary.csv missing longrun runtime metadata columns.")
+            return False
         suite_md = open(os.path.join(summary_dir, "suite_summary.md"), "r", encoding="utf-8").read()
         if "/s" not in suite_md:
             print("[FAIL] suite_summary.md missing human-readable throughput units.")
+            return False
+        if "Effective RunSeconds: 2" not in output or "LongrunEnabled: true" not in output:
+            print("[FAIL] Suite console output missing effective longrun diagnostics.")
+            return False
+        brief_text = open(os.path.join(scenario_dir, "brief.txt"), "r", encoding="utf-8").read()
+        if "RunSeconds:        2" not in brief_text or "LongrunEnabled:    true" not in brief_text:
+            print("[FAIL] brief.txt missing effective runtime or longrun markers.")
             return False
 
         with open(os.path.join(scenario_dir, "longrun_summary.json"), "r", encoding="utf-8") as handle:
@@ -859,6 +870,168 @@ UploadFilePath={TEST_DATA_FILE}
         print("[PASS] Runtime validation and open-ended protection verification succeeded.")
         return True
 
+    def stage_longrun_run_seconds_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 8: Long-Run RunSeconds Resolution Verification")
+        print("=" * 60)
+
+        bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
+        test_root = os.path.join(self.work_dir, "test_longrun_runtime")
+        reports_root = os.path.join(test_root, "reports")
+        logs_root = os.path.join(test_root, "logs")
+        os.makedirs(test_root, exist_ok=True)
+
+        defaults_config = os.path.join(test_root, "defaults_profile.dat")
+        config_runtime = os.path.join(test_root, "config_runtime_profile.dat")
+        invalid_config = os.path.join(test_root, "invalid_profile.dat")
+        users_path = os.path.join(self.work_dir, USERS_FILE)
+        example_suite = os.path.join(self.work_dir, "ci", "perf", "suites", "examples", "longrun_test.yaml")
+        example_tsv = os.path.join(test_root, "example_resolved.tsv")
+        shutil.copy(CONFIG_FILE, defaults_config)
+        shutil.copy(CONFIG_FILE, config_runtime)
+        shutil.copy(CONFIG_FILE, invalid_config)
+
+        with open(config_runtime, "a", encoding="utf-8") as handle:
+            handle.write("RunSeconds=10\n")
+        with open(invalid_config, "a", encoding="utf-8") as handle:
+            handle.write("RunSeconds=0\n")
+
+        defaults_suite = os.path.join(test_root, "defaults_runtime.yaml")
+        scenario_suite = os.path.join(test_root, "scenario_runtime.yaml")
+        config_suite = os.path.join(test_root, "config_runtime.yaml")
+        invalid_suite = os.path.join(test_root, "invalid_runtime.yaml")
+
+        defaults_yaml = f"""suite_id: longrun_defaults_runtime
+defaults:
+  users_file: {users_path}
+  run_seconds: 10
+profiles:
+  base:
+    config_file: {defaults_config}
+scenarios:
+  - scenario_id: longrun_defaults_case
+    profile: base
+    op: download
+    threads: 1
+    object_size: 1MB
+    analyze_longrun: true
+reporting:
+  continue_on_fail: true
+"""
+        scenario_yaml = f"""suite_id: longrun_scenario_runtime
+defaults:
+  users_file: {users_path}
+profiles:
+  base:
+    config_file: {defaults_config}
+scenarios:
+  - scenario_id: longrun_scenario_case
+    profile: base
+    op: download
+    threads: 1
+    object_size: 1MB
+    run_seconds: 10
+    analyze_longrun: true
+reporting:
+  continue_on_fail: true
+"""
+        config_yaml = f"""suite_id: longrun_config_runtime
+defaults:
+  users_file: {users_path}
+profiles:
+  base:
+    config_file: {config_runtime}
+scenarios:
+  - scenario_id: longrun_config_case
+    profile: base
+    op: download
+    threads: 1
+    object_size: 1MB
+    analyze_longrun: true
+reporting:
+  continue_on_fail: true
+"""
+        invalid_yaml = f"""suite_id: longrun_invalid_runtime
+defaults:
+  users_file: {users_path}
+profiles:
+  base:
+    config_file: {invalid_config}
+scenarios:
+  - scenario_id: longrun_invalid_case
+    profile: base
+    op: download
+    threads: 1
+    object_size: 1MB
+    analyze_longrun: true
+reporting:
+  continue_on_fail: true
+"""
+
+        for path, content in [
+            (defaults_suite, defaults_yaml),
+            (scenario_suite, scenario_yaml),
+            (config_suite, config_yaml),
+            (invalid_suite, invalid_yaml),
+        ]:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+
+        ret, output = self.run_cmd(
+            f"python3 scripts/suites/resolve_suite.py --suite {example_suite} --resolved-tsv {example_tsv}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Example longrun suite should resolve successfully from repo root.")
+            return False
+        example_text = open(example_tsv, "r", encoding="utf-8").read()
+        expected_config = os.path.join(self.work_dir, CONFIG_FILE)
+        expected_users = os.path.join(self.work_dir, USERS_FILE)
+        if expected_config not in example_text or expected_users not in example_text:
+            print(example_text)
+            print("[FAIL] Example longrun suite did not resolve config/users via cwd fallback.")
+            return False
+
+        for suite_path, expected_suite_id, expected_scenario_id in [
+            (defaults_suite, "longrun_defaults_runtime", "longrun_defaults_case"),
+            (scenario_suite, "longrun_scenario_runtime", "longrun_scenario_case"),
+            (config_suite, "longrun_config_runtime", "longrun_config_case"),
+        ]:
+            ret, output = self.run_cmd(
+                f"{bin_path} --suite {suite_path} --output-dir {reports_root} --log-dir {logs_root}"
+            )
+            if ret != 0:
+                print(output)
+                print(f"[FAIL] Expected suite to pass: {suite_path}")
+                return False
+            if "Effective RunSeconds: 10" not in output or "LongrunEnabled: true" not in output:
+                print(output)
+                print("[FAIL] Missing effective longrun diagnostics in console output.")
+                return False
+            suite_root = os.path.join(reports_root, expected_suite_id)
+            run_dirs = sorted(os.listdir(suite_root))
+            run_dir = os.path.join(suite_root, run_dirs[-1])
+            scenario_dir = os.path.join(run_dir, "scenarios", expected_scenario_id)
+            brief_text = open(os.path.join(scenario_dir, "brief.txt"), "r", encoding="utf-8").read()
+            if "RunSeconds:        10" not in brief_text or "LongrunEnabled:    true" not in brief_text:
+                print("[FAIL] brief.txt missing effective longrun runtime markers.")
+                return False
+            summary_text = open(os.path.join(run_dir, "summary", "suite_summary.csv"), "r", encoding="utf-8").read()
+            if "run_seconds" not in summary_text or "10" not in summary_text:
+                print("[FAIL] suite_summary.csv missing resolved run_seconds data.")
+                return False
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --suite {invalid_suite} --output-dir {reports_root} --log-dir {logs_root}"
+        )
+        if ret == 0 or "requires RunSeconds > 0" not in output:
+            print(output)
+            print("[FAIL] Long-run scenario without effective RunSeconds should fail fast.")
+            return False
+
+        print("[PASS] Long-run run_seconds resolution verification succeeded.")
+        return True
+
     def print_summary(self):
         print("\n" + "=" * 60)
         print(f"{'BUILD':<12} | {'CASE':<6} | {'STATUS':<10} | {'DETAIL'}")
@@ -905,6 +1078,8 @@ UploadFilePath={TEST_DATA_FILE}
             if not self.stage_suite_baseline_automation_test():
                 sys.exit(1)
             if not self.stage_runtime_validation_test():
+                sys.exit(1)
+            if not self.stage_longrun_run_seconds_test():
                 sys.exit(1)
             self.print_summary()
         except KeyboardInterrupt:

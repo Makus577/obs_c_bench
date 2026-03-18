@@ -30,6 +30,9 @@ SUMMARY_COLUMNS = [
     "op",
     "threads",
     "object_size_spec",
+    "run_seconds",
+    "analyze_longrun",
+    "gate_longrun",
     "actual_duration_s",
     "success_rate_pct",
     "final_tps",
@@ -123,6 +126,9 @@ def build_summary_rows(results: List[Dict[str, str]]) -> List[Dict[str, object]]
                 "op": clean_text(archive_row.get("op") or result.get("op")),
                 "threads": clean_text(archive_row.get("total_threads") or result.get("threads")),
                 "object_size_spec": clean_text(archive_row.get("object_size_spec") or result.get("object_size_spec")),
+                "run_seconds": clean_text(result.get("run_seconds")),
+                "analyze_longrun": clean_text(result.get("analyze_longrun")),
+                "gate_longrun": clean_text(result.get("gate_longrun")),
                 "actual_duration_s": clean_text(archive_row.get("actual_duration_s")),
                 "success_rate_pct": clean_text(archive_row.get("success_rate_pct")),
                 "final_tps": clean_text(archive_row.get("final_tps")),
@@ -184,12 +190,13 @@ def write_summary_md(path: str, suite_meta: Dict[str, object], rows: List[Dict[s
             handle.write("\n")
 
         handle.write("## All Scenarios\n\n")
-        handle.write("| Scenario | Profile | Op | Threads | Object | Duration | TPS | BPS | Avg Single-Core CPU | Perf | Longrun | Final |\n")
-        handle.write("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
+        handle.write("| Scenario | Profile | Op | Threads | Object | RunSeconds | Duration | TPS | BPS | Avg Single-Core CPU | Perf | Longrun | Final |\n")
+        handle.write("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
         for row in rows:
             handle.write(
                 f"| `{row['scenario_id']}` | `{row['profile']}` | `{row['op'] or 'N/A'}` | "
                 f"`{row['threads'] or 'N/A'}` | `{row['object_size_spec'] or 'N/A'}` | "
+                f"`{row['run_seconds'] or 'N/A'}` | "
                 f"`{humanize_duration_s(float(row['actual_duration_s'])) if clean_text(row['actual_duration_s']) else 'N/A'}` | "
                 f"`{row['final_tps'] or 'N/A'}` | "
                 f"`{format_human_metric('final_bps_bytes_per_sec', float(row['final_bps_bytes_per_sec'])) if clean_text(row['final_bps_bytes_per_sec']) else 'N/A'}` | "

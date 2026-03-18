@@ -47,6 +47,31 @@ def resolve_path(base_dir: str, value: Any) -> str:
     return os.path.abspath(os.path.join(base_dir, text))
 
 
+def resolve_input_path(base_dir: str, value: Any, repo_basename_fallback: bool = False) -> str:
+    text = clean_text(value)
+    suite_path = resolve_path(base_dir, text)
+    if not text:
+        return ""
+    if os.path.isabs(text):
+        return text
+
+    # Prefer paths relative to the suite file, but fall back to the current
+    # working directory when users invoke example suites from repo root.
+    if os.path.exists(suite_path):
+        return suite_path
+
+    cwd_path = os.path.abspath(text)
+    if os.path.exists(cwd_path):
+        return cwd_path
+
+    if repo_basename_fallback:
+        repo_path = os.path.join(REPO_ROOT, os.path.basename(text))
+        if os.path.exists(repo_path):
+            return repo_path
+
+    return suite_path
+
+
 def parse_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
@@ -94,7 +119,7 @@ def build_default_settings(doc: Dict[str, Any], suite_dir: str) -> Dict[str, Any
     longrun = gates.get("longrun") or {}
     baseline = doc.get("baseline") or {}
 
-    defaults["users_file"] = resolve_path(suite_dir, defaults.get("users_file"))
+    defaults["users_file"] = resolve_input_path(suite_dir, defaults.get("users_file"), repo_basename_fallback=True)
     defaults["allow_open_ended_run"] = parse_bool(defaults.get("allow_open_ended_run"), False)
     defaults["continue_on_fail"] = parse_bool(
         reporting.get("continue_on_fail", defaults.get("continue_on_fail")),
@@ -108,7 +133,7 @@ def build_default_settings(doc: Dict[str, Any], suite_dir: str) -> Dict[str, Any
         longrun.get("fail_on_regression", defaults.get("gate_longrun")),
         False,
     )
-    defaults["longrun_policy"] = resolve_path(
+    defaults["longrun_policy"] = resolve_input_path(
         suite_dir,
         longrun.get("policy") or defaults.get("longrun_policy") or DEFAULT_LONGRUN_POLICY,
     )
@@ -117,7 +142,7 @@ def build_default_settings(doc: Dict[str, Any], suite_dir: str) -> Dict[str, Any
         baseline.get("enabled", defaults.get("baseline_enabled")),
         defaults["baseline_mode"] in ("generate", "compare"),
     )
-    defaults["baseline_policy"] = resolve_path(
+    defaults["baseline_policy"] = resolve_input_path(
         suite_dir,
         baseline.get("policy") or defaults.get("baseline_policy") or DEFAULT_PERF_POLICY,
     )
@@ -145,14 +170,14 @@ def build_profile_map(doc: Dict[str, Any], suite_dir: str) -> Dict[str, Dict[str
         profile = raw_value or {}
         if not isinstance(profile, dict):
             raise ValueError(f"Profile '{profile_name}' must be a mapping.")
-        config_file = resolve_path(suite_dir, profile.get("config_file"))
+        config_file = resolve_input_path(suite_dir, profile.get("config_file"), repo_basename_fallback=True)
         if not config_file:
             raise ValueError(f"Profile '{profile_name}' is missing config_file.")
         normalized_profile: Dict[str, Any] = {
             "profile": profile_name,
             "config_file": config_file,
         }
-        users_file = resolve_path(suite_dir, profile.get("users_file"))
+        users_file = resolve_input_path(suite_dir, profile.get("users_file"), repo_basename_fallback=True)
         if users_file:
             normalized_profile["users_file"] = users_file
         normalized[profile_name] = normalized_profile
@@ -191,9 +216,9 @@ def materialize_scenario(
     merged = merge_dicts(defaults, profiles[profile_name], raw, baseline_fields)
     merged["suite_id"] = suite_id
     merged["profile"] = profile_name
-    merged["config_file"] = resolve_path(suite_dir, merged.get("config_file"))
-    merged["users_file"] = resolve_path(suite_dir, merged.get("users_file"))
-    merged["longrun_policy"] = resolve_path(
+    merged["config_file"] = resolve_input_path(suite_dir, merged.get("config_file"), repo_basename_fallback=True)
+    merged["users_file"] = resolve_input_path(suite_dir, merged.get("users_file"), repo_basename_fallback=True)
+    merged["longrun_policy"] = resolve_input_path(
         suite_dir,
         merged.get("longrun_policy") or DEFAULT_LONGRUN_POLICY,
     )
@@ -201,7 +226,7 @@ def materialize_scenario(
     merged["object_size"] = clean_text(merged.get("object_size") or merged.get("object_size_spec"))
     merged["baseline_mode"] = clean_text(merged.get("baseline_mode") or "off").lower()
     merged["baseline_enabled"] = parse_bool(merged.get("baseline_enabled"), merged["baseline_mode"] in ("generate", "compare"))
-    merged["baseline_policy"] = resolve_path(suite_dir, merged.get("baseline_policy") or DEFAULT_PERF_POLICY)
+    merged["baseline_policy"] = resolve_input_path(suite_dir, merged.get("baseline_policy") or DEFAULT_PERF_POLICY)
     merged["baseline_manifest"] = resolve_path(suite_dir, merged.get("baseline_manifest") or DEFAULT_BASELINES_MANIFEST)
     merged["baseline_store_dir"] = resolve_path(suite_dir, merged.get("baseline_store_dir") or DEFAULT_BASELINE_STORE)
     merged["baseline_update_strategy"] = clean_text(

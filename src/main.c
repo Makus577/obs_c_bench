@@ -87,6 +87,10 @@ typedef struct {
     int exit_status;
     int longrun_exit_status;
     int baseline_exit_status;
+    int effective_run_seconds;
+    int effective_requests_per_thread;
+    int analyze_longrun;
+    int gate_longrun;
     char report_dir[PATH_MAX];
     char log_dir[PATH_MAX];
 } ScenarioRunResult;
@@ -376,6 +380,18 @@ static int validate_runtime_config(const Config *cfg, int using_explicit_total_t
     }
     if (cfg->test_case == TEST_CASE_RESUMABLE && cfg->upload_file_path[0] == '\0') {
         snprintf(errbuf, errbuf_size, "Resumable upload requires UploadFilePath to be configured.");
+        return -1;
+    }
+    if ((cfg->analyze_longrun || cfg->gate_longrun) && cfg->run_seconds <= 0) {
+        snprintf(
+            errbuf,
+            errbuf_size,
+            "Long-run scenario '%s' requires RunSeconds > 0. Effective RunSeconds=%d, AnalyzeLongrun=%s, GateLongrun=%s",
+            cfg->scenario_id[0] ? cfg->scenario_id : "unknown",
+            cfg->run_seconds,
+            cfg->analyze_longrun ? "true" : "false",
+            cfg->gate_longrun ? "true" : "false"
+        );
         return -1;
     }
     if (cfg->test_case == TEST_CASE_MIX) {
@@ -916,6 +932,8 @@ static void apply_suite_scenario_overrides(Config *cfg, const CliOptions *cli, c
         cfg->requests_per_thread = scenario->requests_per_thread;
     }
     cfg->allow_open_ended_run = scenario->allow_open_ended_run;
+    cfg->analyze_longrun = scenario->analyze_longrun;
+    cfg->gate_longrun = scenario->gate_longrun;
 
     snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", scenario->config_file);
     if (!cfg->is_temporary_token) {
@@ -1085,6 +1103,7 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
     fprintf(fp, "  Avg Threads/User:  %.2f\n", threads_per_user_effective);
     fprintf(fp, "  RunSeconds:        %d %s\n", cfg->run_seconds, cfg->run_seconds > 0 ? "(Time Limited)" : "(No Limit)");
     fprintf(fp, "  Reqs/Thread:       %d\n", cfg->requests_per_thread);
+    fprintf(fp, "  LongrunEnabled:    %s\n", (cfg->analyze_longrun || cfg->gate_longrun) ? "true" : "false");
     fprintf(fp, "  OpenEndedRun:      %s\n", cfg->allow_open_ended_run ? "ENABLED (explicit override)" : "disabled");
 
     fprintf(fp, "[ObjectSettings]\n");
@@ -1173,6 +1192,10 @@ static int run_benchmark_scenario(const CliOptions *cli,
         memset(result, 0, sizeof(*result));
         result->exit_status = 1;
         result->longrun_exit_status = 0;
+        result->effective_run_seconds = 0;
+        result->effective_requests_per_thread = 0;
+        result->analyze_longrun = 0;
+        result->gate_longrun = 0;
         snprintf(result->report_dir, sizeof(result->report_dir), "%s", report_dir);
         snprintf(result->log_dir, sizeof(result->log_dir), "%s", log_dir);
     }
@@ -1234,11 +1257,20 @@ static int run_benchmark_scenario(const CliOptions *cli,
     if (cfg.scenario_id[0] == '\0') {
         infer_scenario_id(&cfg, cfg.scenario_id, sizeof(cfg.scenario_id));
     }
+    if (result) {
+        result->effective_run_seconds = cfg.run_seconds;
+        result->effective_requests_per_thread = cfg.requests_per_thread;
+        result->analyze_longrun = cfg.analyze_longrun;
+        result->gate_longrun = cfg.gate_longrun;
+    }
 
     printf("[Config] Multi-User Mode: %d Users Loaded. Total Threads: %d\n", cfg.loaded_user_count, cfg.threads);
     printf("[Config] Operation: %s (%d)\n", test_case_to_name(cfg.test_case), cfg.test_case);
     printf("[Config] ObjectSize: %s\n", cfg.object_size_spec);
     printf("[Config] ExecutionMode: %s\n", execution_mode_label(&cfg));
+    printf("[Config] Effective RunSeconds: %d\n", cfg.run_seconds);
+    printf("[Config] Effective RequestsPerThread: %d\n", cfg.requests_per_thread);
+    printf("[Config] LongrunEnabled: %s\n", (cfg.analyze_longrun || cfg.gate_longrun) ? "true" : "false");
     if (scenario) printf("[Config] Suite Scenario: %s (%s)\n", scenario->scenario_id, scenario->profile);
     if (cfg.allow_open_ended_run && strcmp(execution_mode_label(&cfg), "Open-Ended") == 0) {
         printf("[Config] OpenEndedRun: ENABLED (explicit override)\n");
@@ -1445,7 +1477,7 @@ cleanup:
 static int write_suite_result_header(const char *path) {
     FILE *fp = fopen(path, "w");
     if (!fp) return -1;
-    fprintf(fp, "suite_id\trun_id\tscenario_id\tprofile\tconfig_file\tusers_file\top\tthreads\tobject_size_spec\treport_dir\tlog_dir\texit_status\tlongrun_exit_status\tbaseline_exit_status\tbaseline_mode\n");
+    fprintf(fp, "suite_id\trun_id\tscenario_id\tprofile\tconfig_file\tusers_file\top\tthreads\tobject_size_spec\trun_seconds\trequests_per_thread\tanalyze_longrun\tgate_longrun\treport_dir\tlog_dir\texit_status\tlongrun_exit_status\tbaseline_exit_status\tbaseline_mode\n");
     fclose(fp);
     return 0;
 }
@@ -1456,7 +1488,7 @@ static int append_suite_result(const char *path,
                                const ScenarioRunResult *result) {
     FILE *fp = fopen(path, "a");
     if (!fp) return -1;
-    fprintf(fp, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+    fprintf(fp, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%d\t%d\t%d\t%s\n",
             scenario->suite_id,
             run_id,
             scenario->scenario_id,
@@ -1466,6 +1498,10 @@ static int append_suite_result(const char *path,
             scenario->op,
             scenario->threads,
             scenario->object_size_spec,
+            result->effective_run_seconds,
+            result->effective_requests_per_thread,
+            result->analyze_longrun,
+            result->gate_longrun,
             result->report_dir,
             result->log_dir,
             result->exit_status,

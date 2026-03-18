@@ -280,6 +280,8 @@ int load_config(const char *filename, Config *cfg) {
     
     cfg->enable_data_validation = 0;
     cfg->enable_detail_log = 0;
+    cfg->analyze_longrun = 0;
+    cfg->gate_longrun = 0;
     cfg->config_file_path[0] = '\0';
     cfg->users_file_path[0] = '\0';
     
