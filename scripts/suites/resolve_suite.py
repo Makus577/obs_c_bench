@@ -95,6 +95,7 @@ def build_default_settings(doc: Dict[str, Any], suite_dir: str) -> Dict[str, Any
     baseline = doc.get("baseline") or {}
 
     defaults["users_file"] = resolve_path(suite_dir, defaults.get("users_file"))
+    defaults["allow_open_ended_run"] = parse_bool(defaults.get("allow_open_ended_run"), False)
     defaults["continue_on_fail"] = parse_bool(
         reporting.get("continue_on_fail", defaults.get("continue_on_fail")),
         True,
@@ -225,6 +226,7 @@ def materialize_scenario(
     requests_per_thread = merged.get("requests_per_thread")
     merged["run_seconds"] = "" if run_seconds in (None, "") else int(run_seconds)
     merged["requests_per_thread"] = "" if requests_per_thread in (None, "") else int(requests_per_thread)
+    merged["allow_open_ended_run"] = parse_bool(merged.get("allow_open_ended_run"), False)
     merged["enabled"] = parse_bool(merged.get("enabled"), True)
     merged["continue_on_fail"] = parse_bool(merged.get("continue_on_fail"), True)
     merged["analyze_longrun"] = parse_bool(merged.get("analyze_longrun"), False)
@@ -305,6 +307,7 @@ def write_resolved_tsv(path: str, scenarios: List[Dict[str, Any]]) -> None:
         "object_size_spec",
         "run_seconds",
         "requests_per_thread",
+        "allow_open_ended_run",
         "continue_on_fail",
         "analyze_longrun",
         "gate_longrun",
@@ -330,6 +333,7 @@ def write_resolved_tsv(path: str, scenarios: List[Dict[str, Any]]) -> None:
                 clean_text(scenario.get("object_size")),
                 clean_text(scenario.get("run_seconds")),
                 clean_text(scenario.get("requests_per_thread")),
+                "1" if parse_bool(scenario.get("allow_open_ended_run"), False) else "0",
                 "1" if parse_bool(scenario.get("continue_on_fail"), True) else "0",
                 "1" if parse_bool(scenario.get("analyze_longrun"), False) else "0",
                 "1" if parse_bool(scenario.get("gate_longrun"), False) else "0",

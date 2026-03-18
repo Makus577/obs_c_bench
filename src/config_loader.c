@@ -261,6 +261,7 @@ int load_config(const char *filename, Config *cfg) {
     cfg->mix_loop_count = 0; 
     cfg->use_mix_mode = 0;
     cfg->run_seconds = 0;
+    cfg->allow_open_ended_run = 0;
     cfg->target_user_count = 0;
     cfg->threads_per_user = 1;
     cfg->bucket_name_fixed[0] = '\0';
@@ -375,6 +376,7 @@ int load_config(const char *filename, Config *cfg) {
         else if (strcmp(key, "MixOperation") == 0) cfg->mix_op_count = parse_mix_ops(val, cfg->mix_ops, MAX_MIX_OPS);
         else if (strcmp(key, "MixLoopCount") == 0) cfg->mix_loop_count = atoll(val);
         else if (strcmp(key, "RunSeconds") == 0) cfg->run_seconds = atoi(val);
+        else if (strcmp(key, "AllowOpenEndedRun") == 0) cfg->allow_open_ended_run = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
         
         // ------------------
         // 安全配置映射

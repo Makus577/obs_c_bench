@@ -9,6 +9,7 @@ import sys
 import re
 import platform
 import json
+import signal
 
 # ================= 配置区域 =================
 CONFIG_FILE = 'config.dat'
@@ -22,6 +23,9 @@ EnableDataValidation = 'false' #冒烟测试无需校验一致性
 SUITE_FILE = './test_suite.yaml'
 PROFILE_CONFIG_A = './test_profile_a.dat'
 PROFILE_CONFIG_B = './test_profile_b.dat'
+OPEN_ENDED_BLOCKED_CONFIG = './test_open_ended_blocked.dat'
+OPEN_ENDED_ALLOWED_CONFIG = './test_open_ended_allowed.dat'
+INVALID_THREADS_CONFIG = './test_invalid_threads.dat'
 
 # 测试用例 ID
 TEST_CASES = [201, 202, 204, 216, 230, 900]
@@ -135,7 +139,14 @@ class BenchmarkTester:
             extra_path = os.path.join(self.work_dir, extra_dir)
             if os.path.exists(extra_path):
                 shutil.rmtree(extra_path)
-        for extra_file in [SUITE_FILE, PROFILE_CONFIG_A, PROFILE_CONFIG_B]:
+        for extra_file in [
+            SUITE_FILE,
+            PROFILE_CONFIG_A,
+            PROFILE_CONFIG_B,
+            OPEN_ENDED_BLOCKED_CONFIG,
+            OPEN_ENDED_ALLOWED_CONFIG,
+            INVALID_THREADS_CONFIG,
+        ]:
             extra_path = os.path.join(self.work_dir, extra_file)
             if os.path.exists(extra_path):
                 os.remove(extra_path)
@@ -150,6 +161,25 @@ class BenchmarkTester:
         m_success = re.search(r"Success:\s+(\d+)", output)
         if m_success: stats["success"] = int(m_success.group(1))
         return stats
+
+    def run_open_ended_with_sigint(self, cmd, grace_seconds=1.5):
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=self.env,
+        )
+        try:
+            time.sleep(grace_seconds)
+            proc.send_signal(signal.SIGINT)
+            output, _ = proc.communicate(timeout=10)
+            return proc.returncode, output
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            output, _ = proc.communicate()
+            return -1, output + "\n[TEST] Process did not exit after SIGINT."
 
     def stage_compile_all(self):
         """Stage 1: 编译所有版本并缓存"""
@@ -557,11 +587,47 @@ reporting:
         generate_suite = os.path.join(auto_root, "baseline_generate.yaml")
         compare_suite = os.path.join(auto_root, "baseline_compare.yaml")
         profile_path = os.path.join(auto_root, "baseline_profile.dat")
-        perf_policy = os.path.join(self.work_dir, "ci", "perf", "gate_policy.json")
+        perf_policy = os.path.join(auto_root, "baseline_gate_policy.json")
         users_path = os.path.join(self.work_dir, USERS_FILE)
 
         os.makedirs(auto_root, exist_ok=True)
         shutil.copy(CONFIG_FILE, profile_path)
+        with open(perf_policy, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "required_match_fields": [
+                        "op",
+                        "total_threads",
+                        "object_size_spec",
+                        "users_loaded"
+                    ],
+                    "advisory_match_fields": [
+                        "config_file",
+                        "users_file",
+                        "host_os",
+                        "host_arch"
+                    ],
+                    "metrics": {
+                        "final_tps": {"enabled": True, "warn_threshold_pct": 50.0, "fail_threshold_pct": 80.0},
+                        "final_bps_bytes_per_sec": {"enabled": True, "warn_threshold_pct": 50.0, "fail_threshold_pct": 80.0},
+                        "avg_latency_ms": {"enabled": False},
+                        "p99_latency_ms": {"enabled": False},
+                        "avg_cpu_pct": {"enabled": False},
+                        "success_rate_pct": {"enabled": True, "warn_threshold_pct": 5.0, "fail_threshold_pct": 20.0, "absolute_warn_min": 90.0, "absolute_fail_min": 50.0},
+                        "failed_requests": {"enabled": True, "warn_threshold_pct": 100.0, "fail_threshold_pct": 100.0, "absolute_warn_max": 0.0, "absolute_fail_max": 0.0},
+                        "peak_tps": {"enabled": False},
+                        "peak_bps_bytes_per_sec": {"enabled": False},
+                        "peak_cpu_pct": {"enabled": False},
+                        "avg_rss_mb": {"enabled": False},
+                        "peak_rss_mb": {"enabled": False},
+                        "avg_single_stream_bps": {"enabled": False},
+                        "max_single_stream_bps": {"enabled": False}
+                    }
+                },
+                handle,
+                indent=2,
+                ensure_ascii=False,
+            )
 
         generate_yaml = f"""suite_id: auto_baseline_generate
 defaults:
@@ -718,6 +784,81 @@ gates:
         print(f"[PASS] Auto baseline generate/compare verification succeeded under {auto_root}")
         return True
 
+    def stage_runtime_validation_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 7: Runtime Validation & Open-Ended Protection")
+        print("=" * 60)
+
+        bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
+
+        blocked_cfg = os.path.join(self.work_dir, OPEN_ENDED_BLOCKED_CONFIG)
+        allowed_cfg = os.path.join(self.work_dir, OPEN_ENDED_ALLOWED_CONFIG)
+        invalid_threads_cfg = os.path.join(self.work_dir, INVALID_THREADS_CONFIG)
+
+        blocked_text = f"""Endpoint=obs.example.com
+Users=1
+ThreadsPerUser=1
+TestCase=201
+ObjectSize=1MB
+RunSeconds=0
+RequestsPerThread=0
+AllowOpenEndedRun=false
+UploadFilePath={TEST_DATA_FILE}
+"""
+        allowed_text = f"""Endpoint=obs.example.com
+Users=1
+ThreadsPerUser=1
+TestCase=201
+ObjectSize=1MB
+RunSeconds=0
+RequestsPerThread=0
+AllowOpenEndedRun=true
+UploadFilePath={TEST_DATA_FILE}
+"""
+        invalid_threads_text = f"""Endpoint=obs.example.com
+Users=1
+ThreadsPerUser=0
+TestCase=201
+ObjectSize=1MB
+RunSeconds=10
+RequestsPerThread=0
+UploadFilePath={TEST_DATA_FILE}
+"""
+
+        with open(blocked_cfg, "w", encoding="utf-8") as handle:
+            handle.write(blocked_text)
+        with open(allowed_cfg, "w", encoding="utf-8") as handle:
+            handle.write(allowed_text)
+        with open(invalid_threads_cfg, "w", encoding="utf-8") as handle:
+            handle.write(invalid_threads_text)
+
+        ret, output = self.run_cmd(f"{bin_path} --config {blocked_cfg} --users {USERS_FILE}")
+        if ret == 0 or "Open-ended run is blocked by default" not in output:
+            print(output)
+            print("[FAIL] Open-ended run should be blocked unless explicitly enabled.")
+            return False
+
+        ret, output = self.run_open_ended_with_sigint(
+            f"{bin_path} --config {allowed_cfg} --users {USERS_FILE}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Explicitly allowed open-ended run should start and exit cleanly after SIGINT.")
+            return False
+        if "OpenEndedRun: ENABLED" not in output or "ExecutionMode: Open-Ended" not in output:
+            print(output)
+            print("[FAIL] Open-ended run should clearly announce explicit override and execution mode.")
+            return False
+
+        ret, output = self.run_cmd(f"{bin_path} --config {invalid_threads_cfg} --users {USERS_FILE}")
+        if ret == 0 or "ThreadsPerUser must be > 0" not in output:
+            print(output)
+            print("[FAIL] Invalid ThreadsPerUser should fail before worker startup.")
+            return False
+
+        print("[PASS] Runtime validation and open-ended protection verification succeeded.")
+        return True
+
     def print_summary(self):
         print("\n" + "=" * 60)
         print(f"{'BUILD':<12} | {'CASE':<6} | {'STATUS':<10} | {'DETAIL'}")
@@ -762,6 +903,8 @@ gates:
             if not self.stage_suite_test():
                 sys.exit(1)
             if not self.stage_suite_baseline_automation_test():
+                sys.exit(1)
+            if not self.stage_runtime_validation_test():
                 sys.exit(1)
             self.print_summary()
         except KeyboardInterrupt:

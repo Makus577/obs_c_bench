@@ -99,6 +99,7 @@ typedef struct {
     int parts_for_each_upload_id; // [新增]: 控制多段上传的固定段数
     char key_prefix[64];
     int run_seconds;
+    int allow_open_ended_run;
     
     LogLevel log_level;
     int obj_name_pattern_hash; 

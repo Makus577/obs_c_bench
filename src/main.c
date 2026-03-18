@@ -76,6 +76,7 @@ typedef struct {
     int run_seconds;
     int requests_per_thread_set;
     int requests_per_thread;
+    int allow_open_ended_run;
     int continue_on_fail;
     int analyze_longrun;
     int gate_longrun;
@@ -285,6 +286,118 @@ static void infer_scenario_id(const Config *cfg, char *buf, size_t buf_size) {
              test_case_to_name(cfg->test_case),
              cfg->object_size_spec[0] ? cfg->object_size_spec : "default",
              cfg->threads > 0 ? cfg->threads : 0);
+}
+
+static const char *execution_mode_label(const Config *cfg) {
+    if (!cfg) return "Unknown";
+    if (cfg->run_seconds > 0) return "Time-Limited";
+    if (cfg->test_case == TEST_CASE_MIX) {
+        if (cfg->mix_loop_count > 0 && cfg->requests_per_thread > 0) return "Request-Limited";
+    } else if (cfg->requests_per_thread > 0) {
+        return "Request-Limited";
+    }
+    if (cfg->allow_open_ended_run) return "Open-Ended";
+    return "Invalid";
+}
+
+static int is_supported_test_case(int test_case) {
+    switch (test_case) {
+        case TEST_CASE_PUT:
+        case TEST_CASE_GET:
+        case TEST_CASE_DELETE:
+        case TEST_CASE_MULTIPART:
+        case TEST_CASE_RESUMABLE:
+        case TEST_CASE_MIX:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int validate_runtime_config(const Config *cfg, int using_explicit_total_threads, char *errbuf, size_t errbuf_size) {
+    long long multipart_total_bytes = 0;
+    int request_limited = 0;
+
+    if (!cfg || !errbuf || errbuf_size == 0) return -1;
+    errbuf[0] = '\0';
+
+    if (!is_supported_test_case(cfg->test_case)) {
+        snprintf(errbuf, errbuf_size, "Unsupported TestCase: %d", cfg->test_case);
+        return -1;
+    }
+    if (cfg->run_seconds < 0) {
+        snprintf(errbuf, errbuf_size, "RunSeconds must be >= 0. Current value: %d", cfg->run_seconds);
+        return -1;
+    }
+    if (cfg->requests_per_thread < 0) {
+        snprintf(errbuf, errbuf_size, "RequestsPerThread must be >= 0. Current value: %d", cfg->requests_per_thread);
+        return -1;
+    }
+    if (cfg->loaded_user_count <= 0) {
+        snprintf(errbuf, errbuf_size, "No users loaded from %s", cfg->users_file_path[0] ? cfg->users_file_path : "users file");
+        return -1;
+    }
+    if (!using_explicit_total_threads && cfg->threads_per_user <= 0) {
+        snprintf(errbuf, errbuf_size, "ThreadsPerUser must be > 0 when total threads are derived from config. Current value: %d", cfg->threads_per_user);
+        return -1;
+    }
+    if (cfg->threads <= 0) {
+        snprintf(errbuf, errbuf_size, "Total threads must be > 0. Current value: %d", cfg->threads);
+        return -1;
+    }
+    if (cfg->object_size_min <= 0 || cfg->object_size_max <= 0) {
+        snprintf(errbuf, errbuf_size, "ObjectSize must be > 0. Current range: %lld ~ %lld Bytes", cfg->object_size_min, cfg->object_size_max);
+        return -1;
+    }
+    if (cfg->object_size_min > cfg->object_size_max) {
+        snprintf(errbuf, errbuf_size, "ObjectSize range is invalid. Current range: %lld ~ %lld Bytes", cfg->object_size_min, cfg->object_size_max);
+        return -1;
+    }
+    if (cfg->part_size <= 0) {
+        snprintf(errbuf, errbuf_size, "PartSize must be > 0. Current value: %lld", cfg->part_size);
+        return -1;
+    }
+    if (cfg->test_case == TEST_CASE_MULTIPART) {
+        if (cfg->parts_for_each_upload_id <= 0) {
+            snprintf(errbuf, errbuf_size, "Multipart upload requires PartsForEachUploadID > 0. Current value: %d", cfg->parts_for_each_upload_id);
+            return -1;
+        }
+        if (cfg->part_size > 0 && cfg->parts_for_each_upload_id > 0 &&
+            cfg->part_size > LLONG_MAX / cfg->parts_for_each_upload_id) {
+            snprintf(errbuf, errbuf_size, "Multipart total size overflow risk: PartSize=%lld, PartsForEachUploadID=%d",
+                     cfg->part_size, cfg->parts_for_each_upload_id);
+            return -1;
+        }
+        multipart_total_bytes = cfg->part_size * (long long)cfg->parts_for_each_upload_id;
+        if (multipart_total_bytes <= 0) {
+            snprintf(errbuf, errbuf_size, "Multipart total object size must be > 0. Current value: %lld", multipart_total_bytes);
+            return -1;
+        }
+    }
+    if (cfg->test_case == TEST_CASE_RESUMABLE && cfg->upload_file_path[0] == '\0') {
+        snprintf(errbuf, errbuf_size, "Resumable upload requires UploadFilePath to be configured.");
+        return -1;
+    }
+    if (cfg->test_case == TEST_CASE_MIX) {
+        if (cfg->mix_op_count <= 0) {
+            snprintf(errbuf, errbuf_size, "Mix mode requires MixOperation to contain at least one valid operation.");
+            return -1;
+        }
+        if (cfg->mix_loop_count < 0) {
+            snprintf(errbuf, errbuf_size, "MixLoopCount must be >= 0. Current value: %lld", cfg->mix_loop_count);
+            return -1;
+        }
+        request_limited = (cfg->mix_loop_count > 0 && cfg->requests_per_thread > 0);
+    } else {
+        request_limited = (cfg->requests_per_thread > 0);
+    }
+    if (cfg->run_seconds <= 0 && !request_limited && !cfg->allow_open_ended_run) {
+        snprintf(errbuf, errbuf_size,
+                 "Open-ended run is blocked by default. Set RunSeconds > 0 or provide a bounded request plan, or explicitly enable AllowOpenEndedRun=true.");
+        return -1;
+    }
+
+    return 0;
 }
 
 static void str_tolower(char *dst, const char *src) {
@@ -586,7 +699,7 @@ static int load_suite_scenarios(const char *manifest_path, SuiteScenario **out_s
     }
 
     while (fgets(line, sizeof(line), fp)) {
-        char *fields[20] = {0};
+        char *fields[21] = {0};
         char *cursor = line;
         int field_count = 0;
         SuiteScenario *scenario;
@@ -594,14 +707,14 @@ static int load_suite_scenarios(const char *manifest_path, SuiteScenario **out_s
         trim_newline(line);
         if (line[0] == '\0') continue;
 
-        while (field_count < 20) {
+        while (field_count < 21) {
             char *tab = strchr(cursor, '\t');
             fields[field_count++] = cursor;
             if (!tab) break;
             *tab = '\0';
             cursor = tab + 1;
         }
-        if (field_count < 20) continue;
+        if (field_count < 21) continue;
 
         if (count >= capacity) {
             SuiteScenario *grown;
@@ -627,16 +740,17 @@ static int load_suite_scenarios(const char *manifest_path, SuiteScenario **out_s
         snprintf(scenario->object_size_spec, sizeof(scenario->object_size_spec), "%s", fields[7]);
         scenario->run_seconds = parse_optional_int(fields[8], &scenario->run_seconds_set);
         scenario->requests_per_thread = parse_optional_int(fields[9], &scenario->requests_per_thread_set);
-        scenario->continue_on_fail = parse_optional_bool(fields[10], 1);
-        scenario->analyze_longrun = parse_optional_bool(fields[11], 0);
-        scenario->gate_longrun = parse_optional_bool(fields[12], 0);
-        snprintf(scenario->longrun_policy, sizeof(scenario->longrun_policy), "%s", fields[13]);
-        snprintf(scenario->baseline_mode, sizeof(scenario->baseline_mode), "%s", fields[14]);
-        scenario->baseline_enabled = parse_optional_bool(fields[15], 0);
-        snprintf(scenario->baseline_policy, sizeof(scenario->baseline_policy), "%s", fields[16]);
-        snprintf(scenario->baseline_manifest, sizeof(scenario->baseline_manifest), "%s", fields[17]);
-        snprintf(scenario->baseline_store_dir, sizeof(scenario->baseline_store_dir), "%s", fields[18]);
-        snprintf(scenario->baseline_update_strategy, sizeof(scenario->baseline_update_strategy), "%s", fields[19]);
+        scenario->allow_open_ended_run = parse_optional_bool(fields[10], 0);
+        scenario->continue_on_fail = parse_optional_bool(fields[11], 1);
+        scenario->analyze_longrun = parse_optional_bool(fields[12], 0);
+        scenario->gate_longrun = parse_optional_bool(fields[13], 0);
+        snprintf(scenario->longrun_policy, sizeof(scenario->longrun_policy), "%s", fields[14]);
+        snprintf(scenario->baseline_mode, sizeof(scenario->baseline_mode), "%s", fields[15]);
+        scenario->baseline_enabled = parse_optional_bool(fields[16], 0);
+        snprintf(scenario->baseline_policy, sizeof(scenario->baseline_policy), "%s", fields[17]);
+        snprintf(scenario->baseline_manifest, sizeof(scenario->baseline_manifest), "%s", fields[18]);
+        snprintf(scenario->baseline_store_dir, sizeof(scenario->baseline_store_dir), "%s", fields[19]);
+        snprintf(scenario->baseline_update_strategy, sizeof(scenario->baseline_update_strategy), "%s", fields[20]);
         count++;
     }
 
@@ -801,6 +915,7 @@ static void apply_suite_scenario_overrides(Config *cfg, const CliOptions *cli, c
     if (scenario->requests_per_thread_set) {
         cfg->requests_per_thread = scenario->requests_per_thread;
     }
+    cfg->allow_open_ended_run = scenario->allow_open_ended_run;
 
     snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", scenario->config_file);
     if (!cfg->is_temporary_token) {
@@ -964,11 +1079,13 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
 
     fprintf(fp, "[TestPlan]\n");
     fprintf(fp, "  Operation:         %s (%d)\n", test_case_to_name(cfg->test_case), cfg->test_case);
+    fprintf(fp, "  ExecutionMode:     %s\n", execution_mode_label(cfg));
     fprintf(fp, "  Total Threads:     %d\n", cfg->threads);
     fprintf(fp, "  Loaded Users:      %d\n", cfg->loaded_user_count);
     fprintf(fp, "  Avg Threads/User:  %.2f\n", threads_per_user_effective);
     fprintf(fp, "  RunSeconds:        %d %s\n", cfg->run_seconds, cfg->run_seconds > 0 ? "(Time Limited)" : "(No Limit)");
     fprintf(fp, "  Reqs/Thread:       %d\n", cfg->requests_per_thread);
+    fprintf(fp, "  OpenEndedRun:      %s\n", cfg->allow_open_ended_run ? "ENABLED (explicit override)" : "disabled");
 
     fprintf(fp, "[ObjectSettings]\n");
     fprintf(fp, "  ObjectSizeSpec:    %s\n", cfg->object_size_spec);
@@ -1045,10 +1162,12 @@ static int run_benchmark_scenario(const CliOptions *cli,
     double single_stream_sum = 0.0;
     int single_stream_count = 0;
     int global_thread_idx = 0;
+    int using_explicit_total_threads = 0;
     int u;
     int exit_code = 1;
     int obs_initialized = 0;
     const char *config_path = scenario ? scenario->config_file : cli->config_file;
+    char validation_error[512];
 
     if (result) {
         memset(result, 0, sizeof(*result));
@@ -1083,11 +1202,6 @@ static int run_benchmark_scenario(const CliOptions *cli,
     LOG_INFO("Report Output Dir: %s", cfg.report_task_dir);
     LOG_INFO("Log Output Dir: %s", cfg.log_task_dir);
 
-    if (cfg.test_case == TEST_CASE_MULTIPART && cfg.parts_for_each_upload_id <= 0) {
-        LOG_ERROR("FATAL: TestCase 216 (Multipart Upload) requires 'PartsForEachUploadID' to be explicitly set in config.dat (valid range: 1~10000).");
-        goto cleanup;
-    }
-
     if (cfg.is_temporary_token) {
         char cmd[PATH_MAX * 2];
         LOG_INFO("IsTemporaryToken enabled. Fetching STS tokens for %d users...", cfg.target_user_count);
@@ -1109,10 +1223,10 @@ static int run_benchmark_scenario(const CliOptions *cli,
         goto cleanup;
     }
 
+    using_explicit_total_threads = (scenario != NULL || cli->threads_set);
     if (scenario) {
         cfg.threads = scenario->threads;
     } else if (!cli->threads_set) {
-        if (cfg.threads_per_user <= 0) cfg.threads_per_user = 1;
         cfg.threads = cfg.loaded_user_count * cfg.threads_per_user;
     } else {
         cfg.threads = cli->threads;
@@ -1124,9 +1238,19 @@ static int run_benchmark_scenario(const CliOptions *cli,
     printf("[Config] Multi-User Mode: %d Users Loaded. Total Threads: %d\n", cfg.loaded_user_count, cfg.threads);
     printf("[Config] Operation: %s (%d)\n", test_case_to_name(cfg.test_case), cfg.test_case);
     printf("[Config] ObjectSize: %s\n", cfg.object_size_spec);
+    printf("[Config] ExecutionMode: %s\n", execution_mode_label(&cfg));
     if (scenario) printf("[Config] Suite Scenario: %s (%s)\n", scenario->scenario_id, scenario->profile);
+    if (cfg.allow_open_ended_run && strcmp(execution_mode_label(&cfg), "Open-Ended") == 0) {
+        printf("[Config] OpenEndedRun: ENABLED (explicit override)\n");
+        printf("[WARN] This scenario has no automatic stop condition and must be stopped manually.\n");
+    }
     if (cfg.enable_data_validation) printf("[Config] Data Validation: ENABLED\n");
     if (cfg.enable_detail_log) printf("[Config] Detail Request Log: ENABLED\n");
+
+    if (validate_runtime_config(&cfg, using_explicit_total_threads, validation_error, sizeof(validation_error)) != 0) {
+        LOG_ERROR("[Config Error] %s", validation_error);
+        goto cleanup;
+    }
 
     status = obs_initialize(OBS_INIT_ALL);
     if (status != OBS_STATUS_OK) goto cleanup;
