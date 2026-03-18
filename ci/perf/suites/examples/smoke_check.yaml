@@ -1,0 +1,35 @@
+# 用途：快速验证 config.dat / users.dat / 报告输出是否正常
+# 运行：./obs_c_bench --suite ./ci/perf/suites/examples/smoke_check.yaml
+suite_id: smoke_check
+
+defaults:
+  users_file: ../../../users.dat
+  requests_per_thread: 5
+
+profiles:
+  base:
+    config_file: ../../../config.dat
+
+scenarios:
+  - scenario_id: smoke_upload_1mb_2t
+    profile: base
+    op: upload
+    threads: 2
+    object_size: 1MB
+
+baseline:
+  enabled: false
+  mode: off
+  manifest: ../../baselines.csv
+  store_dir: ../../baseline_archives
+  policy: ../../gate_policy.json
+  update_strategy: new_label
+
+gates:
+  longrun:
+    enabled: false
+    fail_on_regression: false
+    policy: ../../longrun_policy.yaml
+
+reporting:
+  continue_on_fail: true

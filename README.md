@@ -183,6 +183,7 @@ user2, YOUR_AK_2, YOUR_SK_2
 * `TestCase=201`：压测动作 (201=PUT, 202=GET, 204=DELETE, 216=MULTIPART, 230=RESUMABLE, 900=MIX)。
 * `ObjectSize=4096`：测试对象的大小 (支持范围配置，如 `1024~4096`)。
 * `RequestsPerThread=10000` 或 `RunSeconds=300`：退出条件限制。
+* `AllowOpenEndedRun=true`：仅当你明确需要手动 `Ctrl+C` 停止时才开启开放式运行；默认不允许 `RunSeconds<=0` 且 `RequestsPerThread<=0` 的组合。
 
 *(注：详细配置说明请参考 `config.dat` 文件内的中文注释)*
 
@@ -223,6 +224,8 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 其中 `--object-size` 支持纯字节数和十进制单位范围，例如 `512KB`、`1MB`、`1MB~16MB`。
 
+执行前会做配置合理性校验。若 `RunSeconds<=0` 且 `RequestsPerThread<=0`，工具默认会直接失败，避免误跑成无终止条件；只有在 `config.dat` 中显式设置 `AllowOpenEndedRun=true`，或在 suite YAML 中显式设置 `allow_open_ended_run: true` 时，才允许开放式运行。
+
 ### 4. CLI 参数说明
 
 | 参数 | 说明 | 示例 |
@@ -252,7 +255,27 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 `--suite` 是 suite 模式唯一新增 CLI。认证模式、协议、证书和 `GmAuthMode` 等基础环境差异继续放在各自 `config.dat` 中；并发数、PUT/GET、对象大小等压测变量则放在 suite YAML 中描述。
 
-推荐的 suite YAML 结构如下：
+先理解 7 个核心概念：
+
+| 概念 | 是否在 YAML 中配置 | 含义 | 例子 |
+| --- | --- | --- | --- |
+| `suite_id` | 是 | 一组场景的测试计划名 | `auth_matrix` |
+| `run_id` | 否 | 一次 suite 实际执行的运行编号，由程序启动时自动生成 | `run_20260318_220054` |
+| `profile` | 是 | 一类基础环境模板，通常绑定一个 `config.dat` | `gm_mutual` |
+| `scenario` | 是 | suite 中的一条具体测试场景 | `gm_mutual_get_1mb_longrun` |
+| `scenario_id` | 是 | 单个 scenario 的稳定标识，用于输出目录和 baseline 主键 | `upload_1mb_32t` |
+| `baseline` | 是 | 当前 suite 是否生成 baseline 或与 baseline 对比 | `mode: generate` |
+| `longrun` | 是 | 当前 suite 是否做长稳分析与长稳门禁 | `gates.longrun.enabled: true` |
+
+其中：
+
+| 运行时概念 | 作用 | 用户是否手工配置 |
+| --- | --- | --- |
+| `suite_id` | 决定 suite 报告根目录名，如 `reports/<suite_id>/...` | 需要 |
+| `run_id` | 区分同一个 suite 的不同执行批次，如 `reports/<suite_id>/<run_id>/...` | 不需要，程序自动生成 |
+| `scenario_id` | 决定单场景目录名，也作为 baseline 主键 | 需要保持稳定 |
+
+推荐的最小 suite YAML 结构如下：
 
 ```yaml
 suite_id: auth_matrix
@@ -271,13 +294,13 @@ profiles:
     config_file: ./configs/gm_mutual.dat
 matrix:
   profile: [inter_oneway, inter_mutual, gm_oneway, gm_mutual]
-  op: [put, get]
+  op: [upload, download]
   threads: [64, 128]
   object_size: [1MB, 4MB]
 scenarios:
   - scenario_id: gm_mutual_get_1mb_longrun
     profile: gm_mutual
-    op: get
+    op: download
     threads: 128
     object_size: 1MB
     analyze_longrun: true
@@ -297,47 +320,54 @@ reporting:
   continue_on_fail: true
 ```
 
-含义约定：
+当前 suite 常用字段建议按下面这张表理解：
 
-* `profiles`：承载国际/国密、单向/双向认证等基础环境差异，每个 profile 对应一个独立 `config.dat`
-* `matrix`：自动交叉展开 `profile/op/threads/object_size`
-* `scenarios`：补充特殊场景或覆盖 matrix 展开结果
-* `reporting.continue_on_fail`：某个 scenario 失败后是否继续后续场景
-* `baseline.*`：是否启用性能基线能力，以及当前场景是生成 baseline 还是对比 baseline
-* `gates.longrun.*`：是否启用长稳分析，以及是否把长稳退化视为 suite 失败
-
-当前 suite 解析器支持的常用字段包括：
-
-* `defaults.users_file`
-* `defaults.requests_per_thread`
-* `defaults.run_seconds`
-* `profiles.<name>.config_file`
-* `profiles.<name>.users_file`
-* `matrix.profile`
-* `matrix.op`
-* `matrix.threads`
-* `matrix.object_size`
-* `scenarios[].scenario_id`
-* `scenarios[].profile`
-* `scenarios[].op`
-* `scenarios[].threads`
-* `scenarios[].object_size`
-* `scenarios[].run_seconds`
-* `scenarios[].requests_per_thread`
-* `scenarios[].analyze_longrun`
-* `scenarios[].gate_longrun`
-* `scenarios[].enabled`
-* `baseline.enabled`
-* `baseline.mode`
-* `baseline.policy`
-* `baseline.manifest`
-* `baseline.store_dir`
-* `baseline.update_strategy`
-* `scenarios[].baseline.enabled`
-* `scenarios[].baseline.mode`
-* `scenarios[].baseline.update_strategy`
+| 字段 | 是否必填 | 含义 | 默认值 | 典型场景 |
+| --- | --- | --- | --- | --- |
+| `suite_id` | 是 | 整个测试计划名称 | 无 | `auth_matrix` |
+| `defaults.users_file` | 否 | 默认用户文件 | 若传 `--users`，则使用 CLI 覆盖；否则空 | 所有场景共用一个 `users.dat` |
+| `defaults.requests_per_thread` | 否 | 每线程请求数 | 空 | 定量短压测 |
+| `defaults.run_seconds` | 否 | 每场景运行秒数 | 空 | 限时压测 |
+| `defaults.allow_open_ended_run` | 否 | 是否允许无终止条件运行 | `false` | 明确要手动停止的开放式压测 |
+| `profiles.<name>.config_file` | 是 | 某类基础环境配置文件 | 无 | 国际/国密、单向/双向认证 |
+| `profiles.<name>.users_file` | 否 | 某 profile 的专属用户文件 | 继承 `defaults.users_file` | 不同认证环境使用不同账号 |
+| `matrix.profile` | 否 | 自动展开的 profile 维度 | 所有 profile | 批量场景 |
+| `matrix.op` | 否 | 自动展开的操作类型 | 空 | `upload/download` 批量展开 |
+| `matrix.threads` | 否 | 自动展开的并发数 | 空 | `16/64/128` |
+| `matrix.object_size` | 否 | 自动展开的对象大小 | 空 | `1MB/4MB/16MB` |
+| `scenarios[].scenario_id` | 建议填 | 单场景稳定 ID | 自动推导 | baseline、报告目录 |
+| `scenarios[].profile` | 是 | 选择哪个 profile | 无 | 绑定某个 `config.dat` |
+| `scenarios[].op` | 是 | 单场景操作 | 无 | `upload` 或 `download` |
+| `scenarios[].threads` | 是 | 单场景总并发 | 无 | `32` |
+| `scenarios[].object_size` | 是 | 单场景对象大小 | 无 | `1MB` |
+| `scenarios[].run_seconds` | 否 | 覆盖默认运行秒数 | 继承 `defaults.run_seconds` | 长稳或限时压测 |
+| `scenarios[].requests_per_thread` | 否 | 覆盖默认请求数 | 继承 `defaults.requests_per_thread` | 精细控制单场景请求量 |
+| `scenarios[].allow_open_ended_run` | 否 | 覆盖是否允许开放式运行 | 继承 `defaults.allow_open_ended_run` | 单场景手动停止测试 |
+| `scenarios[].analyze_longrun` | 否 | 是否生成长稳分析 | `false` | 长稳测试 |
+| `scenarios[].gate_longrun` | 否 | 是否让长稳分析影响最终结论 | `false` | 长稳门禁 |
+| `scenarios[].enabled` | 否 | 是否启用该场景 | `true` | 暂时关闭某个场景 |
+| `baseline.enabled` | 否 | 是否启用 baseline 能力 | `false` | baseline 生成/对比 |
+| `baseline.mode` | 否 | `off/generate/compare` | `off` | 生成或对比 baseline |
+| `baseline.manifest` | 否 | baseline 清单文件 | `./ci/perf/baselines.csv` | 基线登记 |
+| `baseline.store_dir` | 否 | baseline 归档目录 | `./ci/perf/baseline_archives` | 存放 baseline archive |
+| `baseline.policy` | 否 | 性能门禁策略 | `./ci/perf/gate_policy.json` | perf gate |
+| `baseline.update_strategy` | 否 | baseline 更新策略 | `new_label` | 保留历史基线或覆盖 |
+| `gates.longrun.enabled` | 否 | 是否启用长稳分析 | `false` | 长稳测试 |
+| `gates.longrun.fail_on_regression` | 否 | 长稳退化是否判失败 | `false` | 长稳门禁 |
+| `gates.longrun.policy` | 否 | 长稳策略文件 | `./ci/perf/longrun_policy.yaml` | 长稳阈值 |
+| `reporting.continue_on_fail` | 否 | 某场景失败后是否继续后续场景 | `true` | 长 suite 批跑 |
 
 若同时传了 `--users`，它会作为 suite 的默认 `users_file` 覆盖，除非 profile 或 scenario 显式指定了自己的用户文件。
+
+典型模板索引如下：
+
+| 场景 | 示例文件 | 适用目的 |
+| --- | --- | --- |
+| 简单性能测试 / 配置校验 | [`ci/perf/suites/examples/smoke_check.yaml`](/Users/wuchengqi/huaweicloud/obs_c_bench/ci/perf/suites/examples/smoke_check.yaml) | 快速确认 `config.dat`、`users.dat`、报告输出是否正常 |
+| 性能测试并生成 baseline | [`ci/perf/suites/examples/perf_generate_baseline.yaml`](/Users/wuchengqi/huaweicloud/obs_c_bench/ci/perf/suites/examples/perf_generate_baseline.yaml) | 首次生成稳定性能基线 |
+| 性能测试并对比 baseline | [`ci/perf/suites/examples/perf_compare_baseline.yaml`](/Users/wuchengqi/huaweicloud/obs_c_bench/ci/perf/suites/examples/perf_compare_baseline.yaml) | SDK 或参数优化后的性能对比 |
+| 长稳测试 | [`ci/perf/suites/examples/longrun_test.yaml`](/Users/wuchengqi/huaweicloud/obs_c_bench/ci/perf/suites/examples/longrun_test.yaml) | 观察内存泄漏、吞吐衰减、成功率漂移 |
+| 完整矩阵测试 | [`ci/perf/suites/auth_matrix.yaml`](/Users/wuchengqi/huaweicloud/obs_c_bench/ci/perf/suites/auth_matrix.yaml) | 四种认证场景 × 操作 × 并发 × 对象大小的批量测试 |
 
 ### 5. 对象大小写法
 
@@ -352,6 +382,27 @@ reporting:
 * `1KB = 1000 Bytes`
 * `1MB = 1000 * 1000 Bytes`
 * `1GB = 1000 * 1000 * 1000 Bytes`
+
+### 6. 执行前配置校验
+
+为了避免误把任务跑成长期不退出，工具会在启动 worker 之前做统一校验。默认会拦截以下高风险配置：
+
+| 校验项 | 默认行为 |
+| --- | --- |
+| `RunSeconds<=0` 且 `RequestsPerThread<=0` | 失败，除非显式开启 `AllowOpenEndedRun=true` / `allow_open_ended_run: true` |
+| `threads<=0` 或 `ThreadsPerUser<=0` | 失败 |
+| `RequestsPerThread<0` 或 `RunSeconds<0` | 失败 |
+| 非法 `TestCase` | 失败 |
+| `ObjectSize<=0` 或对象大小范围非法 | 失败 |
+| `PartSize<=0` | 失败 |
+| `multipart` 但 `PartsForEachUploadID<=0` | 失败 |
+| `resumable` 但 `UploadFilePath` 为空 | 失败 |
+| `mix` 但 `MixOperation` 为空 | 失败 |
+
+开放式运行只适合你明确知道需要手动停止的场景。启用后，控制台和 `brief.txt` 会显示：
+
+* `ExecutionMode: Open-Ended`
+* `OpenEndedRun: ENABLED (explicit override)`
 
 ---
 

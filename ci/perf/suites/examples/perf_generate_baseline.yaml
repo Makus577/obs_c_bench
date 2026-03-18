@@ -1,0 +1,35 @@
+# 用途：执行标准性能测试并生成 baseline
+# 运行：./obs_c_bench --suite ./ci/perf/suites/examples/perf_generate_baseline.yaml
+suite_id: perf_generate_baseline
+
+defaults:
+  users_file: ../../../users.dat
+  requests_per_thread: 100
+
+profiles:
+  base:
+    config_file: ../../../config.dat
+
+scenarios:
+  - scenario_id: upload_1mb_32t
+    profile: base
+    op: upload
+    threads: 32
+    object_size: 1MB
+
+baseline:
+  enabled: true
+  mode: generate
+  manifest: ../../baselines.csv
+  store_dir: ../../baseline_archives
+  policy: ../../gate_policy.json
+  update_strategy: new_label
+
+gates:
+  longrun:
+    enabled: false
+    fail_on_regression: false
+    policy: ../../longrun_policy.yaml
+
+reporting:
+  continue_on_fail: true

@@ -1,0 +1,37 @@
+# 用途：执行长稳测试并输出长稳分析结果
+# 运行：./obs_c_bench --suite ./ci/perf/suites/examples/longrun_test.yaml
+suite_id: longrun_test
+
+defaults:
+  users_file: ../../../users.dat
+
+profiles:
+  base:
+    config_file: ../../../config.dat
+
+scenarios:
+  - scenario_id: longrun_download_4mb_64t
+    profile: base
+    op: download
+    threads: 64
+    object_size: 4MB
+    run_seconds: 3600
+    analyze_longrun: true
+    gate_longrun: true
+
+baseline:
+  enabled: false
+  mode: off
+  manifest: ../../baselines.csv
+  store_dir: ../../baseline_archives
+  policy: ../../gate_policy.json
+  update_strategy: new_label
+
+gates:
+  longrun:
+    enabled: true
+    fail_on_regression: true
+    policy: ../../longrun_policy.yaml
+
+reporting:
+  continue_on_fail: true
