@@ -8,6 +8,7 @@
 * 用命令行覆盖操作类型、总并发数、对象大小
 * 通过 CLI 分别指定报告导出目录和日志目录
 * 通过 `archive.csv`、基线清单与门禁脚本做性能基线对比
+* 通过 `--suite <suite.yaml>` 在同一进程内顺序执行多场景测试计划
 * 在 Linux x86 / ARM 环境下采集 CPU、RSS、TPS、BPS、平均时延、P99 时延、单流带宽
 * 默认将报告输出到 `reports/`，日志输出到 `logs/`
 * 通过 `make sdk-bootstrap` 或 `OBS_SDK_ROOT=/path make` 显式引入真实 OBS C SDK
@@ -56,7 +57,7 @@
 * 支持 x86_64 / aarch64 Linux
 * GCC 编译器 (支持 C99/GNU99 标准)
 * 华为云 OBS C SDK (`eSDKOBS`) 及对应的 `libcurl`, `openssl` 动态库
-* Python 3.x 及 `pandas`, `matplotlib` (仅用于后期图表生成)
+* Python 3.x 及 `pandas`, `matplotlib`, `PyYAML` (用于图表生成、suite 解析与长稳分析)
 
 > 说明：运行期 CPU / RSS 采样依赖 Linux `/proc` 与 POSIX 时间接口，因此正式压测环境应为 Linux。开发机在非 Linux 环境下可以完成部分 mock 联调，但内存指标可能为空或显示 `-1`。
 >
@@ -232,10 +233,111 @@ user2, YOUR_AK_2, YOUR_SK_2
 | `--threads <N>` | 覆盖总并发线程数；多用户时会按用户均分，余数从前往后补齐 | `--threads 1024` |
 | `--object-size <spec>` | 覆盖对象大小，支持纯字节数、十进制单位和区间 | `--object-size 1MB~16MB` |
 | `--scenario-id <id>` | 显式指定固定压测场景 ID，便于性能基线对比和 CI 门禁 | `--scenario-id upload_1mb_128t` |
+| `--suite <path>` | 进入 suite 模式，在同一主进程内顺序执行 YAML 定义的多场景测试计划 | `--suite ./ci/perf/suites/auth_matrix.yaml` |
 | `--output-dir <path>` | 仅控制报告导出目录，作用于 `archive.csv`、`brief.txt` | `--output-dir /data/reports` |
 | `--log-dir <path>` | 仅控制日志目录，作用于 `realtime.txt`、`detail_*.csv` | `--log-dir /data/logs` |
 
 参数优先级固定为：`CLI > config.dat > 默认值`。
+
+### 4.1 Suite 模式
+
+当你需要在一次执行里连续跑多组小场景时，可以使用：
+
+```bash
+./obs_c_bench \
+  --suite ./ci/perf/suites/auth_matrix.yaml \
+  --output-dir ./suite_reports \
+  --log-dir ./suite_logs
+```
+
+`--suite` 是 suite 模式唯一新增 CLI。认证模式、协议、证书和 `GmAuthMode` 等基础环境差异继续放在各自 `config.dat` 中；并发数、PUT/GET、对象大小等压测变量则放在 suite YAML 中描述。
+
+推荐的 suite YAML 结构如下：
+
+```yaml
+suite_id: auth_matrix
+description: inter/gm auth matrix benchmark
+defaults:
+  users_file: ./users.dat
+  requests_per_thread: 100
+profiles:
+  inter_oneway:
+    config_file: ./configs/inter_oneway.dat
+  inter_mutual:
+    config_file: ./configs/inter_mutual.dat
+  gm_oneway:
+    config_file: ./configs/gm_oneway.dat
+  gm_mutual:
+    config_file: ./configs/gm_mutual.dat
+matrix:
+  profile: [inter_oneway, inter_mutual, gm_oneway, gm_mutual]
+  op: [put, get]
+  threads: [64, 128]
+  object_size: [1MB, 4MB]
+scenarios:
+  - scenario_id: gm_mutual_get_1mb_longrun
+    profile: gm_mutual
+    op: get
+    threads: 128
+    object_size: 1MB
+    analyze_longrun: true
+baseline:
+  enabled: true
+  mode: compare
+  manifest: ./ci/perf/baselines.csv
+  store_dir: ./ci/perf/baseline_archives
+  policy: ./ci/perf/gate_policy.json
+  update_strategy: new_label
+gates:
+  longrun:
+    enabled: true
+    fail_on_regression: true
+    policy: ./ci/perf/longrun_policy.yaml
+reporting:
+  continue_on_fail: true
+```
+
+含义约定：
+
+* `profiles`：承载国际/国密、单向/双向认证等基础环境差异，每个 profile 对应一个独立 `config.dat`
+* `matrix`：自动交叉展开 `profile/op/threads/object_size`
+* `scenarios`：补充特殊场景或覆盖 matrix 展开结果
+* `reporting.continue_on_fail`：某个 scenario 失败后是否继续后续场景
+* `baseline.*`：是否启用性能基线能力，以及当前场景是生成 baseline 还是对比 baseline
+* `gates.longrun.*`：是否启用长稳分析，以及是否把长稳退化视为 suite 失败
+
+当前 suite 解析器支持的常用字段包括：
+
+* `defaults.users_file`
+* `defaults.requests_per_thread`
+* `defaults.run_seconds`
+* `profiles.<name>.config_file`
+* `profiles.<name>.users_file`
+* `matrix.profile`
+* `matrix.op`
+* `matrix.threads`
+* `matrix.object_size`
+* `scenarios[].scenario_id`
+* `scenarios[].profile`
+* `scenarios[].op`
+* `scenarios[].threads`
+* `scenarios[].object_size`
+* `scenarios[].run_seconds`
+* `scenarios[].requests_per_thread`
+* `scenarios[].analyze_longrun`
+* `scenarios[].gate_longrun`
+* `scenarios[].enabled`
+* `baseline.enabled`
+* `baseline.mode`
+* `baseline.policy`
+* `baseline.manifest`
+* `baseline.store_dir`
+* `baseline.update_strategy`
+* `scenarios[].baseline.enabled`
+* `scenarios[].baseline.mode`
+* `scenarios[].baseline.update_strategy`
+
+若同时传了 `--users`，它会作为 suite 的默认 `users_file` 覆盖，除非 profile 或 scenario 显式指定了自己的用户文件。
 
 ### 5. 对象大小写法
 
@@ -269,6 +371,12 @@ user2, YOUR_AK_2, YOUR_SK_2
 * `logs/task_xxx/realtime.txt`: 每 3 秒一次的实时采样日志；若任务在 3 秒内结束，会补写最后一条样本。
 * `logs/task_xxx/detail_X_partY.csv`: 高性能、多线程切割的请求级明细日志。
 
+在 suite 模式下，输出目录按 suite 组织：
+
+* `reports/<suite_id>/<run_id>/summary/`
+* `reports/<suite_id>/<run_id>/scenarios/<scenario_id>/`
+* `logs/<suite_id>/<run_id>/scenarios/<scenario_id>/`
+
 若使用 `--output-dir` 或 `--log-dir`，则仅替换对应类别文件的根目录，任务子目录名仍保持一致。
 
 ### 归档文件说明
@@ -290,6 +398,7 @@ CSV 格式，列定义如下：
 * `RunTime(s)`: 从任务启动到本次采样的累计时间
 * `Process(%)`: 任务进度；限时任务按 `RunSeconds` 计算，定量任务按预计请求数计算
 * `CPU(%)`: 相邻两次采样之间的进程 CPU 占用百分比
+* `SingleCoreCPU(%)`: 相邻两次采样之间的单核等效 CPU 占用，定义为 `CPU(%) / 逻辑核数`
 * `RSS(MB)`: 当前进程驻留内存
 * `Interval_TPS`: 相邻两次采样之间的区间 TPS
 * `Interval_BPS(Bytes/s)`: 相邻两次采样之间的区间带宽
@@ -322,6 +431,8 @@ CSV 格式，列定义如下：
 * `success_rate_pct`
 * `avg_cpu_pct`
 * `peak_cpu_pct`
+* `avg_single_core_cpu_pct`
+* `peak_single_core_cpu_pct`
 * `avg_rss_mb`
 * `peak_rss_mb`
 * `final_tps`
@@ -337,12 +448,41 @@ CSV 格式，列定义如下：
 * `host_os`
 * `host_arch`
 
+#### Suite 汇总文件
+
+suite 模式下会额外生成：
+
+* `suite_manifest_resolved.yaml`
+* `suite_summary.csv`
+* `suite_summary.json`
+* `suite_summary.md`
+* `suite_failures.json`
+* `scenarios/<scenario_id>/longrun_summary.json`
+* `scenarios/<scenario_id>/longrun_summary.md`
+
+其中：
+
+* `suite_summary.csv/json`：每个 scenario 一行/一项，适合横向比较四种认证场景下不同并发、PUT/GET、对象大小的性能指标，并直接给出 `perf_status`、`final_status`、`final_reason`
+* `suite_summary.md`：面向人工阅读的 suite 汇总报告，带宽、时长等会用人类化单位显示
+* `suite_failures.json`：记录 scenario 执行失败或长稳判定失败的场景
+
+若启用了自动 baseline 比较，还会在具体 scenario 目录下生成：
+
+* `perf_gate/compare.csv`
+* `perf_gate/compare.md`
+* `perf_gate/gate_result.json`
+
 ### 指标口径说明
 
 为避免带宽统计失真，程序内部区分两套字节口径：
 
 * `streamed_bytes`: 用于 `realtime.txt` 的实时区间/累计带宽采样
 * `completed_success_bytes`: 仅在请求最终成功后入账，用于最终 `BPS`、`archive.csv` 和 `brief.txt` 中的汇总指标
+
+为兼顾可读性和可机器处理性，当前采用两层展示策略：
+
+* `archive.csv`、`suite_summary.csv/json`、`compare.csv`、`gate_result.json` 保留原始数值口径
+* `brief.txt`、`suite_summary.md`、`compare.md`、`longrun_summary.md` 会把带宽、容量、时延、时长按十进制 SI 规则做人类化展示，例如 `MB/s`、`GB`、`1h 2m 3s`
 
 主要指标定义如下：
 
@@ -353,11 +493,13 @@ CSV 格式，列定义如下：
 * `单流带宽 = 单线程成功字节数 / 该线程实际运行时长`
 * `Avg Single Stream = 所有线程单流带宽均值`
 * `Max Single Stream = 所有线程单流带宽最大值`
+* `Single-Core CPU = 进程 CPU(%) / 逻辑核数`
 
 ### 采样实现说明
 
 * 采样线程默认每 3 秒运行一次
 * CPU 通过 `CLOCK_PROCESS_CPUTIME_ID` 计算相邻采样窗口的区间 CPU%
+* 单核等效 CPU 通过 `CPU(%) / 逻辑核数` 计算，并会同时写入 `realtime.txt`、`archive.csv` 与 suite 汇总
 * 内存通过读取 `/proc/self/status` 中的 `VmRSS` 获取
 * 若任务运行不足 3 秒，程序会在结束阶段强制补采样一次，因此 `realtime.txt` 仍然会有完整指标，`archive.csv` / `brief.txt` 也会得到完整汇总
 * 若极端环境下无法读取 RSS，则对应字段会写为 `-1`，不会中断压测流程
@@ -370,8 +512,13 @@ CSV 格式，列定义如下：
 
 * `ci/perf/baselines.csv`: 场景到基线 `archive.csv` 的映射清单
 * `ci/perf/gate_policy.json`: 默认保守门禁策略
+* `ci/perf/longrun_policy.yaml`: 默认长稳分析阈值模板
 * `scripts/reporting/compare_archive.py`: 对比两份 `archive.csv`
 * `scripts/reporting/perf_gate.py`: 基于策略执行性能门禁
+* `scripts/reporting/register_baseline.py`: 自动注册或更新某个场景的 baseline
+* `scripts/reporting/analyze_longrun.py`: 基于 `realtime.txt` + `archive.csv` 分析长稳结果
+* `scripts/reporting/generate_suite_summary.py`: 生成 suite 级汇总报告
+* `scripts/suites/resolve_suite.py`: 解析并展开 suite YAML
 
 手工对比示例：
 
@@ -413,6 +560,11 @@ python3 scripts/reporting/perf_gate.py \
 * `avg_single_stream_bps`
 * `max_single_stream_bps`
 
+说明：
+
+* `avg_single_core_cpu_pct` / `peak_single_core_cpu_pct` 当前会进入归档和报告展示
+* 本轮默认**不**把单核 CPU 指标纳入门禁阈值，避免额外放大回归敏感度
+
 其中 `config_file`、`users_file`、`host_os`、`host_arch` 会作为 advisory 字段输出差异，帮助识别“环境不完全一致但仍可比较”的情况。
 
 退出码约定：
@@ -420,6 +572,85 @@ python3 scripts/reporting/perf_gate.py \
 * `0`: 门禁通过
 * `1`: 检测到明显性能回退
 * `2`: 输入不合法或基线/候选数据不可比
+
+### 自动生成 Baseline 并比较
+
+suite 模式支持两种性能基线工作模式：
+
+* `baseline.mode: generate`
+  将当前 scenario 的 `archive.csv` 自动复制到 baseline 存储目录，并自动 upsert `ci/perf/baselines.csv`
+* `baseline.mode: compare`
+  按 `scenario_id` 自动从 `baselines.csv` 找到对应 baseline，调用 `perf_gate.py` 比较并给出 PASS/FAIL 结论
+
+示例：
+
+```yaml
+baseline:
+  enabled: true
+  mode: generate
+  manifest: ./ci/perf/baselines.csv
+  store_dir: ./ci/perf/baseline_archives
+  policy: ./ci/perf/gate_policy.json
+  update_strategy: new_label
+```
+
+后续切换为：
+
+```yaml
+baseline:
+  enabled: true
+  mode: compare
+  manifest: ./ci/perf/baselines.csv
+  store_dir: ./ci/perf/baseline_archives
+  policy: ./ci/perf/gate_policy.json
+  update_strategy: new_label
+```
+
+约定如下：
+
+* `scenario_id` 是 baseline 主键，必须保持稳定
+* `generate` 默认使用 `update_strategy: new_label`，保留历史 baseline 文件，并让 manifest 指向最新版本
+* 若显式配置 `update_strategy: overwrite`，则会覆盖当前 `scenario_id` 对应 baseline 文件
+* `compare` 会把结论写入 `perf_gate/gate_result.json`
+* suite 汇总中的 `perf_status` 会显示：
+  `BASELINE_UPDATED`、`PASS`、`FAIL`、`INCOMPARABLE`
+* suite 汇总中的 `final_status` 会给出该场景是否满足性能要求的统一结论
+
+典型用户路径：
+
+1. 先用 `baseline.mode: generate` 生成一版稳定基线
+2. SDK 或参数优化后，把同一 suite 切成 `baseline.mode: compare`
+3. 查看 `suite_summary.md` / `suite_summary.csv` 中的 `final_status`
+
+注意：suite 模式是“同一主进程顺序执行多个场景”，不是线程、连接或缓存态的在线热切换。
+
+### 长稳分析
+
+`brief.txt` 和 `archive.csv` 提供的是任务级汇总指标，但它们本身无法判断“1 小时后是否存在内存泄漏”或“吞吐是否持续衰减”。这类信息需要结合 `realtime.txt` 的时间序列来分析。
+
+可以使用：
+
+```bash
+python3 scripts/reporting/analyze_longrun.py \
+  --realtime /path/to/realtime.txt \
+  --archive /path/to/archive.csv \
+  --output-dir ./longrun_out \
+  --policy ./ci/perf/longrun_policy.yaml
+```
+
+输出：
+
+* `longrun_summary.json`
+* `longrun_summary.md`
+
+默认会关注：
+
+* RSS 起点、终点、增长量、增长率和斜率
+* CPU 漂移
+* TPS/BPS 前段均值与后段均值的漂移
+* 成功率最小值与尾段均值
+
+若样本不足 3 条，会返回 `INSUFFICIENT_DATA`，但仍然生成分析文件。
 
 ### 一键生成分析看板
 

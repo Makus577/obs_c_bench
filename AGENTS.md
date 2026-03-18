@@ -44,7 +44,9 @@
 - `scripts/sdk/`
   SDK bootstrap、临时凭证生成。
 - `scripts/reporting/`
-  明细日志合并、可视化看板生成。
+  明细日志合并、可视化看板生成、长稳分析、suite 汇总。
+- `scripts/suites/`
+  suite YAML 解析与场景展开。
 - `scripts/data/`
   测试数据生成。
 
@@ -59,14 +61,25 @@
 以下是当前仓库已经固化的关键能力，开发时应默认保持这些行为不回退：
 
 - CLI 支持：
-  `--config`、`--users`、`--op`、`--threads`、`--object-size`、`--output-dir`、`--log-dir`
+  `--config`、`--users`、`--op`、`--threads`、`--object-size`、`--output-dir`、`--log-dir`、`--suite`
 - 输出目录默认分离：
   报告在 `reports/task_<timestamp>/`
   日志在 `logs/task_<timestamp>/`
+- suite 模式：
+  `--suite <yaml>` 进入同一进程内的多场景顺序执行模式
+  suite 解析入口是 `scripts/suites/resolve_suite.py`
+  suite 汇总入口是 `scripts/reporting/generate_suite_summary.py`
+  baseline 自动注册入口是 `scripts/reporting/register_baseline.py`
 - 报告文件：
   `archive.csv`、`brief.txt`
 - 日志文件：
   `realtime.txt`、`detail_*.csv`
+- 长稳分析文件：
+  `longrun_summary.json`、`longrun_summary.md`
+- 自动 baseline 比较文件：
+  `perf_gate/compare.csv`
+  `perf_gate/compare.md`
+  `perf_gate/gate_result.json`
 - 采样周期固定 3 秒，但短任务结束时必须补写最终样本。
 - 性能归档指标包含：
   CPU、RSS、TPS、BPS、平均 latency、P99 latency、单流带宽。
@@ -105,6 +118,8 @@
   CLI 参数
   输出目录
   指标口径
+  suite YAML 结构
+  长稳分析输出
   SDK 引入方式
   Python 脚本路径
 - 如果改了代理或测试脚本入口，同时同步检查 `.agents/workflows/`。
@@ -169,6 +184,19 @@
 - monitor 线程周期是 3 秒。
 - 若任务在 3 秒内完成，结束时必须补采样一次。
 - 修改 monitor 流程时不要回退这个行为。
+
+### 7. Suite 模式职责边界
+- 单场景路径仍然是主路径，suite 只是把多个 scenario 串到同一个主进程里顺序执行。
+- 认证模式、协议、证书差异优先放在不同 `config.dat` profile 中，不要为了 suite 再把这些配置铺平成一堆单场景 CLI。
+- suite YAML 的解析和汇总交给 Python 脚本，C 侧重点是顺序执行、输出目录和场景切换。
+- 性能基线推荐通过 suite 的 `baseline.mode` 管理：
+  `generate` 自动更新 baseline
+  `compare` 自动对比并回填结论
+
+### 8. 长稳结论不能只看 archive.csv
+- `archive.csv` / `brief.txt` 只提供任务级汇总。
+- 判断内存泄漏嫌疑或吞吐衰减时，要结合 `realtime.txt` 跑 `scripts/reporting/analyze_longrun.py`。
+- 若样本过少，`INSUFFICIENT_DATA` 是合法结果，不应误报成 FAIL。
 
 ### 5. 在非 Linux 环境误判 RSS/CPU 为异常
 - 非 Linux mock 联调时，RSS 为 `-1` 是可接受行为。
