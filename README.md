@@ -17,7 +17,7 @@
 
 * **极致的并发性能 (Lock-Free Architecture)**
 * Worker 线程执行请求及本地统计数据收集时**全程无锁**，榨干压测机每一滴 CPU 性能。
-* 独立的旁路监控线程（Monitor Thread）每 3 秒无锁采集全局状态，实时输出 CPU、内存、TPS、BPS 与成功率；若任务在 3 秒内结束，会自动补写最终样本，避免短任务无采样数据。
+* 独立的旁路监控线程（Monitor Thread）每 3 秒无锁采集全局状态，实时输出 CPU、内存、TPS、带宽与成功率；控制台中的 `Window TPS/BW` 表示最近一个采样窗口的吞吐，`Avg TPS/BW` 表示自任务开始以来的累计平均吞吐，其中控制台 TPS 会四舍五入显示为整数 `req/s`，带宽会自动用 `Bytes/s`、`KB/s`、`MB/s`、`GB/s` 等单位展示；若任务在 3 秒内结束，会自动补写最终样本，避免短任务无采样数据。
 
 
 * **确定性伪随机打散 (LCG Hash Naming)**
@@ -37,7 +37,7 @@
 
 * **防爆内存的海量流水落盘 (Log Rotation)**
 * 开启 `EnableDetailLog=true` 后，支持请求级明细流水落盘。
-* 工具自动按任务时间戳创建独立隔离目录（如 `reports/task_20260224_120000/` 与 `logs/task_20260224_120000/`）。
+* 工具自动按“标签优先、时间戳下沉一层”的方式创建隔离目录；单场景默认类似 `reports/upload_1mb_2t/20260224_120000/`，suite 默认类似 `reports/<suite_id>/20260224_120000/`。
 * 单线程流水文件达到 1,000,000 行自动滚动切分（Rotation），防范长时间高并发测试导致的磁盘爆满与后处理 OOM。
 
 
@@ -198,8 +198,10 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 默认输出目录会天然分离：
 
-* 报告目录：`reports/task_<timestamp>/`
-* 日志目录：`logs/task_<timestamp>/`
+* 报告目录：`reports/<scenario_label>/<timestamp>/`
+* 日志目录：`logs/<scenario_label>/<timestamp>/`
+
+其中 `<scenario_label>` 优先使用 `--scenario-id`，否则程序会根据操作类型、对象大小和线程数自动生成类似 `upload_1mb_128t` 的标签。
 
 也可通过 CLI 参数快速覆盖 TestCase，方便脚本串联执行 (例如先跑 201 PUT，再跑 202 GET)：
 
@@ -260,7 +262,7 @@ user2, YOUR_AK_2, YOUR_SK_2
 | 概念 | 是否在 YAML 中配置 | 含义 | 例子 |
 | --- | --- | --- | --- |
 | `suite_id` | 是 | 一组场景的测试计划名 | `auth_matrix` |
-| `run_id` | 否 | 一次 suite 实际执行的运行编号，由程序启动时自动生成 | `run_20260318_220054` |
+| `run_id` | 否 | 一次 suite 实际执行的运行编号，由程序启动时自动生成 | `20260318_220054` |
 | `profile` | 是 | 一类基础环境模板，通常绑定一个 `config.dat` | `gm_mutual` |
 | `scenario` | 是 | suite 中的一条具体测试场景 | `gm_mutual_get_1mb_longrun` |
 | `scenario_id` | 是 | 单个 scenario 的稳定标识，用于输出目录和 baseline 主键 | `upload_1mb_32t` |
@@ -412,21 +414,21 @@ reporting:
 
 每次运行结束后，工具会默认生成两套**同名任务目录**：
 
-* 报告目录：`reports/task_20260224_123045/`
-* 日志目录：`logs/task_20260224_123045/`
+* 报告目录：`reports/upload_1mb_128t/20260224_123045/`
+* 日志目录：`logs/upload_1mb_128t/20260224_123045/`
 
 默认文件归属如下：
 
-* `reports/task_xxx/archive.csv`: 任务级结构化归档文件，便于后续批量汇总与自动分析。
-* `reports/task_xxx/brief.txt`: 全局配置与最终汇总报告。
-* `logs/task_xxx/realtime.txt`: 每 3 秒一次的实时采样日志；若任务在 3 秒内结束，会补写最后一条样本。
-* `logs/task_xxx/detail_X_partY.csv`: 高性能、多线程切割的请求级明细日志。
+* `reports/<scenario_label>/<timestamp>/archive.csv`: 任务级结构化归档文件，便于后续批量汇总与自动分析。
+* `reports/<scenario_label>/<timestamp>/brief.txt`: 全局配置与最终汇总报告。
+* `logs/<scenario_label>/<timestamp>/realtime.txt`: 每 3 秒一次的实时采样日志；若任务在 3 秒内结束，会补写最后一条样本。
+* `logs/<scenario_label>/<timestamp>/detail_X_partY.csv`: 高性能、多线程切割的请求级明细日志。
 
 在 suite 模式下，输出目录按 suite 组织：
 
-* `reports/<suite_id>/<run_id>/summary/`
-* `reports/<suite_id>/<run_id>/scenarios/<scenario_id>/`
-* `logs/<suite_id>/<run_id>/scenarios/<scenario_id>/`
+* `reports/<suite_id>/<timestamp>/summary/`
+* `reports/<suite_id>/<timestamp>/scenarios/<scenario_id>/`
+* `logs/<suite_id>/<timestamp>/scenarios/<scenario_id>/`
 
 若使用 `--output-dir` 或 `--log-dir`，则仅替换对应类别文件的根目录，任务子目录名仍保持一致。
 
@@ -460,13 +462,20 @@ CSV 格式，列定义如下：
 * `Success_Rate(%)`: 当前累计成功率
 * `Total_Reqs`: 当前累计请求数
 
+控制台实时回显会对同一组指标做更易读的展示：
+
+* `Window TPS`: 最近一个采样窗口内的请求吞吐，单位 `req/s`，控制台按四舍五入后的整数展示
+* `Window BW`: 最近一个采样窗口内的带宽，基于 `streamed_bytes` 自动换算成人类可读单位
+* `Avg TPS`: 从任务启动到当前采样点的累计平均请求吞吐，单位 `req/s`，控制台按四舍五入后的整数展示
+* `Avg BW`: 从任务启动到当前采样点的累计平均带宽，基于 `streamed_bytes` 自动换算成人类可读单位
+
 `realtime.txt` 是运行期采样日志，不是中间文件。
 
 #### `archive.csv`
 
 单任务一行，用于机器可读归档。当前字段包括：
 
-* `task_id`
+* `task_id`（当前运行实例目录的时间戳标识，如 `20260319_211219`）
 * `start_time`
 * `config_file`
 * `users_file`
