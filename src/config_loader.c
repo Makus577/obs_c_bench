@@ -10,6 +10,21 @@ typedef enum {
     SIMPLE_SECTION_ADVANCED,
     SIMPLE_SECTION_SECURITY
 } SimpleSection;
+static void remember_unknown_config_key(Config *cfg, const char *key) {
+    int i;
+
+    if (!cfg || !key || key[0] == '\0') return;
+    for (i = 0; i < cfg->unknown_config_key_count; i++) {
+        if (strcmp(cfg->unknown_config_keys[i], key) == 0) return;
+    }
+    if (cfg->unknown_config_key_count < (int)(sizeof(cfg->unknown_config_keys) / sizeof(cfg->unknown_config_keys[0]))) {
+        snprintf(cfg->unknown_config_keys[cfg->unknown_config_key_count],
+                 sizeof(cfg->unknown_config_keys[cfg->unknown_config_key_count]),
+                 "%s",
+                 key);
+        cfg->unknown_config_key_count++;
+    }
+}
 
 static long long parse_size_token(const char *text, int *ok) {
     char *end = NULL;
@@ -368,6 +383,27 @@ static void init_config_defaults(Config *cfg) {
     cfg->gate_longrun = 0;
     cfg->config_file_path[0] = '\0';
     cfg->users_file_path[0] = '\0';
+    cfg->effective_config_path[0] = '\0';
+    cfg->unknown_config_key_count = 0;
+    cfg->run_seconds_source = CONFIG_SOURCE_DEFAULT;
+    cfg->requests_per_thread_source = CONFIG_SOURCE_DEFAULT;
+    cfg->allow_open_ended_run_source = CONFIG_SOURCE_DEFAULT;
+    cfg->range_source = CONFIG_SOURCE_DEFAULT;
+    cfg->part_size_source = CONFIG_SOURCE_DEFAULT;
+    cfg->parts_for_each_upload_id_source = CONFIG_SOURCE_DEFAULT;
+    cfg->upload_file_path_source = CONFIG_SOURCE_DEFAULT;
+    cfg->enable_checkpoint_source = CONFIG_SOURCE_DEFAULT;
+    cfg->enable_detail_log_source = CONFIG_SOURCE_DEFAULT;
+    cfg->gm_auth_mode_source = CONFIG_SOURCE_DEFAULT;
+    cfg->server_cert_path_source = CONFIG_SOURCE_DEFAULT;
+    cfg->client_sign_cert_path_source = CONFIG_SOURCE_DEFAULT;
+    cfg->client_sign_key_path_source = CONFIG_SOURCE_DEFAULT;
+    cfg->client_sign_key_password_source = CONFIG_SOURCE_DEFAULT;
+    cfg->client_enc_cert_path_source = CONFIG_SOURCE_DEFAULT;
+    cfg->client_enc_key_path_source = CONFIG_SOURCE_DEFAULT;
+    cfg->object_size_source = CONFIG_SOURCE_DEFAULT;
+    cfg->threads_source = CONFIG_SOURCE_DEFAULT;
+    
     cfg->object_size_min = cfg->object_size_max = 1024;
     cfg->is_dynamic_size = 0;
     cfg->object_size = 1024;
@@ -381,6 +417,108 @@ static int finalize_config(Config *cfg, const char *source_name, int allow_defau
 
     if (cfg->part_size <= 0) cfg->part_size = 5 * 1024 * 1024;
     if (cfg->target_user_count <= 0 && allow_default_user_count) cfg->target_user_count = 1;
+        char *eq = strchr(clean_line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        
+        char *key = trim_both(clean_line);
+        char *val = trim_both(eq + 1);
+
+        if (strcmp(key, "Endpoint") == 0) strcpy(cfg->endpoint, val);
+        else if (strcmp(key, "Protocol") == 0) strcpy(cfg->protocol, val);
+        else if (strcmp(key, "KeepAlive") == 0) cfg->keep_alive = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        // [新增校验]: 对连接超时的配置值进行合法性检查
+        else if (strcmp(key, "ConnectTimeoutSec") == 0) {
+            if (strlen(val) > 0) {
+                cfg->connect_timeout_sec = atoi(val);
+                if (cfg->connect_timeout_sec <= 0) {
+                    printf("[Config Error] 'ConnectTimeoutSec' must be > 0. Invalid value: %s\n", val);
+                    fclose(fp); return -1;
+                }
+            }
+        }
+        else if (strcmp(key, "RequestTimeoutSec") == 0) {
+            if (strlen(val) > 0) {
+                cfg->request_timeout_sec = atoi(val);
+                if (cfg->request_timeout_sec <= 0) {
+                    printf("[Config Error] 'RequestTimeoutSec' must be > 0. Invalid value: %s\n", val);
+                    fclose(fp); return -1;
+                }
+            }
+        }
+        else if (strcmp(key, "LogLevel") == 0) cfg->log_level = log_level_from_string(val);
+        else if (strcmp(key, "ObjNamePatternHash") == 0) cfg->obj_name_pattern_hash = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        else if (strcmp(key, "EnableCheckpoint") == 0) { cfg->enable_checkpoint = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0); cfg->enable_checkpoint_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "UploadFilePath") == 0) { strcpy(cfg->upload_file_path, val); cfg->upload_file_path_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "BucketNamePrefix") == 0) strcpy(cfg->bucket_name_prefix, val);
+        else if (strcmp(key, "BucketNameFixed") == 0) strcpy(cfg->bucket_name_fixed, val);
+        else if (strcmp(key, "IsTemporaryToken") == 0) cfg->is_temporary_token = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        else if (strcmp(key, "Users") == 0) cfg->target_user_count = atoi(val);
+        else if (strcmp(key, "ThreadsPerUser") == 0) cfg->threads_per_user = atoi(val);
+        else if (strcmp(key, "RequestsPerThread") == 0) { cfg->requests_per_thread = atoi(val); cfg->requests_per_thread_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "TestCase") == 0) cfg->test_case = atoi(val);
+        
+        else if (strcmp(key, "ObjectSize") == 0) {
+            cfg->object_size_source = CONFIG_SOURCE_CONFIG;
+            char errbuf[128] = {0};
+            if (parse_object_size_spec(val, cfg, errbuf, sizeof(errbuf)) != 0) {
+                printf("[Config Error] %s\n", errbuf);
+                fclose(fp); return -1;
+            }
+        }
+        else if (strcmp(key, "Range") == 0) {
+            cfg->range_source = CONFIG_SOURCE_CONFIG;
+            char *temp = strdup(val);
+            if (temp) {
+                char *token = strtok(temp, ";");
+                int idx = 0;
+                while (token != NULL && idx < MAX_RANGE_OPTIONS) {
+                    char *clean_token = trim_both(token);
+                    if (strlen(clean_token) > 0) {
+                        cfg->range_options[idx] = strdup(clean_token);
+                        idx++;
+                    }
+                    token = strtok(NULL, ";");
+                }
+                cfg->range_count = idx;
+                free(temp);
+            }
+        }
+        else if (strcmp(key, "PartSize") == 0) { cfg->part_size = atoll(val); cfg->part_size_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "PartsForEachUploadID") == 0) {
+            cfg->parts_for_each_upload_id = atoi(val);
+            cfg->parts_for_each_upload_id_source = CONFIG_SOURCE_CONFIG;
+            if (cfg->parts_for_each_upload_id < 0) {
+                cfg->parts_for_each_upload_id = 0; 
+            } else if (cfg->parts_for_each_upload_id > 10000) {
+                printf("[WARN] PartsForEachUploadID (%d) exceeds OBS max limit. Capped to 10000.\n", cfg->parts_for_each_upload_id);
+                cfg->parts_for_each_upload_id = 10000;
+            }
+        }
+        else if (strcmp(key, "KeyPrefix") == 0) strcpy(cfg->key_prefix, val);
+        else if (strcmp(key, "MixOperation") == 0) cfg->mix_op_count = parse_mix_ops(val, cfg->mix_ops, MAX_MIX_OPS);
+        else if (strcmp(key, "MixLoopCount") == 0) cfg->mix_loop_count = atoll(val);
+        else if (strcmp(key, "RunSeconds") == 0) { cfg->run_seconds = atoi(val); cfg->run_seconds_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "AllowOpenEndedRun") == 0) { cfg->allow_open_ended_run = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0); cfg->allow_open_ended_run_source = CONFIG_SOURCE_CONFIG; }
+        
+        // ------------------
+        // 安全配置映射
+        // ------------------
+        else if (strcmp(key, "GmAuthMode") == 0) { strcpy(cfg->gm_auth_mode, val); cfg->gm_auth_mode_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ServerCertPath") == 0) { strcpy(cfg->server_cert_path, val); cfg->server_cert_path_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ClientSignCertPath") == 0) { strcpy(cfg->client_sign_cert_path, val); cfg->client_sign_cert_path_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ClientSignKeyPath") == 0) { strcpy(cfg->client_sign_key_path, val); cfg->client_sign_key_path_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ClientSignKeyPassword") == 0) { strcpy(cfg->client_sign_key_password, val); cfg->client_sign_key_password_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ClientEncCertPath") == 0) { strcpy(cfg->client_enc_cert_path, val); cfg->client_enc_cert_path_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ClientEncKeyPath") == 0) { strcpy(cfg->client_enc_key_path, val); cfg->client_enc_key_path_source = CONFIG_SOURCE_CONFIG; }
+
+        else if (strcmp(key, "EnableDataValidation") == 0) cfg->enable_data_validation = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        else if (strcmp(key, "EnableDetailLog") == 0) { cfg->enable_detail_log = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0); cfg->enable_detail_log_source = CONFIG_SOURCE_CONFIG; }
+        else if (strcmp(key, "ResumableTaskNum") == 0) cfg->resumable_task_num = atoi(val);
+        else remember_unknown_config_key(cfg, key);
+    }
+    
+    if (cfg->part_size <= 0) cfg->part_size = 5 * 1024 * 1024; 
     if (cfg->target_user_count <= 0) {
         printf("[Config Error] 'Users' must be greater than 0. Source: %s\n", source_name ? source_name : "unknown");
         return -1;
@@ -723,6 +861,14 @@ static int load_simple_yaml_config_internal(const char *filename, Config *cfg, i
     fclose(fp);
     if (finalize_config(cfg, filename, 1) != 0) return -1;
     snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", filename);
+    if (cfg->unknown_config_key_count > 0) {
+        int i;
+        printf("[Config Warning] Unknown keys in %s:", filename);
+        for (i = 0; i < cfg->unknown_config_key_count; i++) {
+            printf("%s%s", i == 0 ? " " : ", ", cfg->unknown_config_keys[i]);
+        }
+        printf("\n");
+    }
     return 0;
 }
 

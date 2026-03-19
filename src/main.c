@@ -97,6 +97,9 @@ typedef struct {
     char log_dir[PATH_MAX];
 } ScenarioRunResult;
 
+static void cleanup_config_resources(Config *cfg);
+static void apply_cli_overrides(Config *cfg, const CliOptions *cli);
+
 void handle_sigint(int sig) {
     static volatile sig_atomic_t sigint_count = 0;
     (void)sig;
@@ -306,6 +309,291 @@ static const char *execution_mode_label(const Config *cfg) {
     return "Invalid";
 }
 
+static const char *config_source_label(int source) {
+    switch (source) {
+        case CONFIG_SOURCE_CONFIG: return "config.dat";
+        case CONFIG_SOURCE_CLI: return "CLI";
+        case CONFIG_SOURCE_SUITE: return "suite";
+        case CONFIG_SOURCE_DEFAULT:
+        default:
+            return "default";
+    }
+}
+
+static const char *bool_to_word(int value) {
+    return value ? "true" : "false";
+}
+
+static int mix_contains_op(const Config *cfg, int test_case) {
+    int i;
+
+    if (!cfg || cfg->test_case != TEST_CASE_MIX) return 0;
+    for (i = 0; i < cfg->mix_op_count; i++) {
+        if (cfg->mix_ops[i] == test_case) return 1;
+    }
+    return 0;
+}
+
+static void sanitize_markdown_cell(const char *input, char *output, size_t output_size) {
+    size_t i = 0;
+    size_t j = 0;
+
+    if (!output || output_size == 0) return;
+    output[0] = '\0';
+    if (!input) return;
+
+    while (input[i] != '\0' && j + 1 < output_size) {
+        if (input[i] == '|') {
+            if (j + 2 >= output_size) break;
+            output[j++] = '\\';
+            output[j++] = '|';
+        } else if (input[i] == '\n' || input[i] == '\r' || input[i] == '\t') {
+            output[j++] = ' ';
+        } else {
+            output[j++] = input[i];
+        }
+        i++;
+    }
+    output[j] = '\0';
+}
+
+static void write_effective_config_row(FILE *fp,
+                                       const char *field,
+                                       const char *value,
+                                       int source,
+                                       int active,
+                                       const char *impact) {
+    char field_cell[128];
+    char value_cell[512];
+    char impact_cell[512];
+
+    if (!fp) return;
+    sanitize_markdown_cell(field, field_cell, sizeof(field_cell));
+    sanitize_markdown_cell(value, value_cell, sizeof(value_cell));
+    sanitize_markdown_cell(impact, impact_cell, sizeof(impact_cell));
+    fprintf(fp, "| `%s` | `%s` | `%s` | `%s` | %s |\n",
+            field_cell,
+            value_cell[0] ? value_cell : "N/A",
+            config_source_label(source),
+            active ? "yes" : "no",
+            impact_cell[0] ? impact_cell : "N/A");
+}
+
+static int is_field_active_for_case(const Config *cfg, const char *field_name) {
+    if (!cfg || !field_name) return 0;
+    if (strcmp(field_name, "RunSeconds") == 0) return 1;
+    if (strcmp(field_name, "RequestsPerThread") == 0) return 1;
+    if (strcmp(field_name, "AllowOpenEndedRun") == 0) return 1;
+    if (strcmp(field_name, "Range") == 0) {
+        return cfg->test_case == TEST_CASE_GET || mix_contains_op(cfg, TEST_CASE_GET);
+    }
+    if (strcmp(field_name, "PartSize") == 0) {
+        return cfg->test_case == TEST_CASE_MULTIPART ||
+               cfg->test_case == TEST_CASE_RESUMABLE ||
+               mix_contains_op(cfg, TEST_CASE_MULTIPART) ||
+               mix_contains_op(cfg, TEST_CASE_RESUMABLE);
+    }
+    if (strcmp(field_name, "PartsForEachUploadID") == 0) {
+        return cfg->test_case == TEST_CASE_MULTIPART || mix_contains_op(cfg, TEST_CASE_MULTIPART);
+    }
+    if (strcmp(field_name, "UploadFilePath") == 0 || strcmp(field_name, "EnableCheckpoint") == 0) {
+        return cfg->test_case == TEST_CASE_RESUMABLE || mix_contains_op(cfg, TEST_CASE_RESUMABLE);
+    }
+    if (strcmp(field_name, "ObjectSize") == 0) {
+        if (cfg->test_case == TEST_CASE_DELETE) return 0;
+        if (cfg->test_case == TEST_CASE_MIX) {
+            return mix_contains_op(cfg, TEST_CASE_PUT) ||
+                   mix_contains_op(cfg, TEST_CASE_GET) ||
+                   mix_contains_op(cfg, TEST_CASE_MULTIPART) ||
+                   mix_contains_op(cfg, TEST_CASE_RESUMABLE);
+        }
+        return 1;
+    }
+    return 1;
+}
+
+static void warn_unused_config_if_set(const char *field,
+                                      int source,
+                                      int should_warn,
+                                      const char *value,
+                                      const char *reason) {
+    if (!should_warn || source == CONFIG_SOURCE_DEFAULT) return;
+    printf("[Config Warning] %s=%s is ignored for this %s scenario. %s\n",
+           field,
+           value && value[0] ? value : "N/A",
+           reason ? reason : "operation",
+           "See effective_config.md for field relevance details.");
+}
+
+static void emit_irrelevant_config_warnings(const Config *cfg) {
+    char part_size_value[128];
+    char parts_value[64];
+    char range_value[256];
+
+    if (!cfg) return;
+    snprintf(part_size_value, sizeof(part_size_value), "%lld", cfg->part_size);
+    snprintf(parts_value, sizeof(parts_value), "%d", cfg->parts_for_each_upload_id);
+    if (cfg->range_count > 0) {
+        snprintf(range_value, sizeof(range_value), "%s", cfg->range_options[0]);
+        if (cfg->range_count > 1) {
+            snprintf(range_value + strlen(range_value),
+                     sizeof(range_value) - strlen(range_value),
+                     " ... (%d total)",
+                     cfg->range_count);
+        }
+    } else {
+        snprintf(range_value, sizeof(range_value), "%s", "empty");
+    }
+
+    if (!is_field_active_for_case(cfg, "Range") && cfg->range_count > 0) {
+        warn_unused_config_if_set("Range", cfg->range_source, 1, range_value, test_case_to_name(cfg->test_case));
+    }
+    if (!is_field_active_for_case(cfg, "PartSize")) {
+        warn_unused_config_if_set("PartSize", cfg->part_size_source, 1, part_size_value, test_case_to_name(cfg->test_case));
+    }
+    if (!is_field_active_for_case(cfg, "PartsForEachUploadID") && cfg->parts_for_each_upload_id > 0) {
+        warn_unused_config_if_set("PartsForEachUploadID", cfg->parts_for_each_upload_id_source, 1, parts_value, test_case_to_name(cfg->test_case));
+    }
+    if (!is_field_active_for_case(cfg, "UploadFilePath") && cfg->upload_file_path[0] != '\0') {
+        warn_unused_config_if_set("UploadFilePath", cfg->upload_file_path_source, 1, cfg->upload_file_path, test_case_to_name(cfg->test_case));
+    }
+    if (!is_field_active_for_case(cfg, "EnableCheckpoint")) {
+        warn_unused_config_if_set("EnableCheckpoint",
+                                  cfg->enable_checkpoint_source,
+                                  cfg->enable_checkpoint_source != CONFIG_SOURCE_DEFAULT,
+                                  bool_to_word(cfg->enable_checkpoint),
+                                  test_case_to_name(cfg->test_case));
+    }
+    if (!is_field_active_for_case(cfg, "ObjectSize") && cfg->object_size_source != CONFIG_SOURCE_DEFAULT) {
+        warn_unused_config_if_set("ObjectSize", cfg->object_size_source, 1, cfg->object_size_spec, test_case_to_name(cfg->test_case));
+    }
+}
+
+static int write_effective_config_report(const Config *cfg) {
+    FILE *fp;
+    char range_value[512];
+    char part_size_value[128];
+    char object_size_value[128];
+    char threads_value[64];
+    char run_seconds_value[64];
+    char requests_value[64];
+    char parts_value[64];
+    int i;
+
+    if (!cfg || cfg->effective_config_path[0] == '\0') return -1;
+    fp = fopen(cfg->effective_config_path, "w");
+    if (!fp) return -1;
+
+    if (cfg->range_count > 0) {
+        range_value[0] = '\0';
+        for (i = 0; i < cfg->range_count; i++) {
+            if (i > 0) strncat(range_value, "; ", sizeof(range_value) - strlen(range_value) - 1);
+            strncat(range_value, cfg->range_options[i], sizeof(range_value) - strlen(range_value) - 1);
+        }
+    } else {
+        snprintf(range_value, sizeof(range_value), "%s", "N/A");
+    }
+
+    snprintf(part_size_value, sizeof(part_size_value), "%lld Bytes", cfg->part_size);
+    if (cfg->is_dynamic_size) {
+        snprintf(object_size_value,
+                 sizeof(object_size_value),
+                 "%s (%lld~%lld Bytes)",
+                 cfg->object_size_spec,
+                 cfg->object_size_min,
+                 cfg->object_size_max);
+    } else {
+        snprintf(object_size_value,
+                 sizeof(object_size_value),
+                 "%s (%lld Bytes)",
+                 cfg->object_size_spec,
+                 cfg->object_size_max);
+    }
+    snprintf(threads_value, sizeof(threads_value), "%d", cfg->threads);
+    snprintf(run_seconds_value, sizeof(run_seconds_value), "%d", cfg->run_seconds);
+    snprintf(requests_value, sizeof(requests_value), "%d", cfg->requests_per_thread);
+    snprintf(parts_value, sizeof(parts_value), "%d", cfg->parts_for_each_upload_id);
+
+    fprintf(fp, "# Effective Config\n\n");
+    fprintf(fp, "- Scenario ID: `%s`\n", cfg->scenario_id[0] ? cfg->scenario_id : "N/A");
+    fprintf(fp, "- Operation: `%s`\n", test_case_to_name(cfg->test_case));
+    fprintf(fp, "- Execution Mode: `%s`\n", execution_mode_label(cfg));
+    fprintf(fp, "- Report Directory: `%s`\n", cfg->report_task_dir);
+    fprintf(fp, "- Log Directory: `%s`\n", cfg->log_task_dir);
+    fprintf(fp, "- Config File: `%s`\n", cfg->config_file_path[0] ? cfg->config_file_path : "N/A");
+    fprintf(fp, "- Users File: `%s`\n", cfg->users_file_path[0] ? cfg->users_file_path : "N/A");
+    fprintf(fp, "\n");
+    if (cfg->unknown_config_key_count > 0) {
+        fprintf(fp, "## Unknown keys from config.dat\n\n");
+        for (i = 0; i < cfg->unknown_config_key_count; i++) {
+            fprintf(fp, "- `%s`\n", cfg->unknown_config_keys[i]);
+        }
+        fprintf(fp, "\n");
+    }
+    fprintf(fp, "## Effective Fields\n\n");
+    fprintf(fp, "| Field | Final Value | Source | Active In Current Scenario | Impact |\n");
+    fprintf(fp, "| --- | --- | --- | --- | --- |\n");
+    write_effective_config_row(fp, "TestCase", test_case_to_name(cfg->test_case), CONFIG_SOURCE_DEFAULT,
+                               1, "Selects the benchmark operation family and determines which other parameters are meaningful.");
+    write_effective_config_row(fp, "RunSeconds", run_seconds_value, cfg->run_seconds_source,
+                               is_field_active_for_case(cfg, "RunSeconds"),
+                               "Controls time-limited stop conditions. When >0, the run stops by elapsed time.");
+    write_effective_config_row(fp, "RequestsPerThread", requests_value, cfg->requests_per_thread_source,
+                               is_field_active_for_case(cfg, "RequestsPerThread"),
+                               "Controls per-thread request budget when the scenario is request-limited.");
+    write_effective_config_row(fp, "AllowOpenEndedRun", bool_to_word(cfg->allow_open_ended_run), cfg->allow_open_ended_run_source,
+                               is_field_active_for_case(cfg, "AllowOpenEndedRun"),
+                               "Allows runs with no automatic stop condition. Use only when you intend to stop the run manually.");
+    write_effective_config_row(fp, "Threads", threads_value, cfg->threads_source,
+                               1,
+                               "Controls total concurrency. Multi-user runs distribute these threads across loaded users.");
+    write_effective_config_row(fp, "ObjectSize", object_size_value, cfg->object_size_source,
+                               is_field_active_for_case(cfg, "ObjectSize"),
+                               "Controls payload size for upload/download-style traffic. Delete only uses object keys, not payload bytes.");
+    write_effective_config_row(fp, "Range", range_value, cfg->range_source,
+                               is_field_active_for_case(cfg, "Range"),
+                               "Only affects download/get requests. Each configured range entry becomes a selectable byte-range request.");
+    write_effective_config_row(fp, "PartSize", part_size_value, cfg->part_size_source,
+                               is_field_active_for_case(cfg, "PartSize"),
+                               "Controls multipart/resumable chunk granularity and directly affects part count and transfer behavior.");
+    write_effective_config_row(fp, "PartsForEachUploadID", parts_value, cfg->parts_for_each_upload_id_source,
+                               is_field_active_for_case(cfg, "PartsForEachUploadID"),
+                               "Only affects multipart upload. Combined with PartSize to determine total multipart object size.");
+    write_effective_config_row(fp, "UploadFilePath", cfg->upload_file_path[0] ? cfg->upload_file_path : "N/A", cfg->upload_file_path_source,
+                               is_field_active_for_case(cfg, "UploadFilePath"),
+                               "Only affects resumable upload. Points to the local file used by upload-file/checkpoint flow.");
+    write_effective_config_row(fp, "EnableCheckpoint", bool_to_word(cfg->enable_checkpoint), cfg->enable_checkpoint_source,
+                               is_field_active_for_case(cfg, "EnableCheckpoint"),
+                               "Only affects resumable upload. Enables checkpoint persistence for resume/retry behavior.");
+    write_effective_config_row(fp, "EnableDetailLog", bool_to_word(cfg->enable_detail_log), cfg->enable_detail_log_source,
+                               1,
+                               "Controls whether per-request detail_*.csv logs are written.");
+    write_effective_config_row(fp, "GmAuthMode", cfg->gm_auth_mode[0] ? cfg->gm_auth_mode : "Default", cfg->gm_auth_mode_source,
+                               1,
+                               "Controls GM / interworking TLS authentication mode and certificate requirements.");
+    write_effective_config_row(fp, "ServerCertPath", cfg->server_cert_path[0] ? cfg->server_cert_path : "N/A", cfg->server_cert_path_source,
+                               1,
+                               "Used when one-way or mutual TLS validation requires a server-side trust certificate.");
+    write_effective_config_row(fp, "ClientSignCertPath", cfg->client_sign_cert_path[0] ? cfg->client_sign_cert_path : "N/A", cfg->client_sign_cert_path_source,
+                               1,
+                               "Used by mutual-auth scenarios for client signing identity.");
+    write_effective_config_row(fp, "ClientSignKeyPath", cfg->client_sign_key_path[0] ? cfg->client_sign_key_path : "N/A", cfg->client_sign_key_path_source,
+                               1,
+                               "Used by mutual-auth scenarios for the client signing private key.");
+    write_effective_config_row(fp, "ClientSignKeyPassword", cfg->client_sign_key_password[0] ? "(set)" : "N/A", cfg->client_sign_key_password_source,
+                               1,
+                               "Password used to unlock the client signing key when required.");
+    write_effective_config_row(fp, "ClientEncCertPath", cfg->client_enc_cert_path[0] ? cfg->client_enc_cert_path : "N/A", cfg->client_enc_cert_path_source,
+                               1,
+                               "Used by GM mutual-auth scenarios for client encryption certificate material.");
+    write_effective_config_row(fp, "ClientEncKeyPath", cfg->client_enc_key_path[0] ? cfg->client_enc_key_path : "N/A", cfg->client_enc_key_path_source,
+                               1,
+                               "Used by GM mutual-auth scenarios for client encryption private key material.");
+
+    fclose(fp);
+    return 0;
+}
+
 static int is_supported_test_case(int test_case) {
     switch (test_case) {
         case TEST_CASE_PUT:
@@ -492,6 +780,8 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     double success_rate = 0.0;
     double progress_pct;
     Config *cfg;
+    char interval_bps_human[64];
+    char cumul_bps_human[64];
 
     gather_thread_counters(m_args, &current_success, &current_fail, &current_streamed_bytes);
     current_total = current_success + current_fail;
@@ -517,6 +807,8 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     if (current_total > 0) {
         success_rate = ((double)current_success / current_total) * 100.0;
     }
+    format_rate_si(interval_bps, interval_bps_human, sizeof(interval_bps_human));
+    format_rate_si(cumul_bps, cumul_bps_human, sizeof(cumul_bps_human));
 
     if (interval_tps > m_args->peak_tps) m_args->peak_tps = interval_tps;
     if (interval_bps > m_args->peak_bps) m_args->peak_bps = interval_bps;
@@ -546,11 +838,11 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     }
 
     if (progress_pct >= 0.0) {
-        printf("[Monitor] RunTime: %8.1fs | Process: %6.2f%% | CPU: %7.2f%% | RSS: %8.2f MB | Interval TPS: %8.2f | Interval BPS: %12.2f | Cumul TPS: %8.2f | Cumul BPS: %12.2f | Success Rate: %7.3f%% | Total Reqs: %lld\n",
-               elapsed_s, progress_pct, cpu_pct, rss_mb, interval_tps, interval_bps, cumul_tps, cumul_bps, success_rate, current_total);
+        printf("[Monitor] RunTime: %8.1fs | Process: %6.2f%% | CPU: %7.2f%% | RSS: %8.2f MB | Window TPS: %8.0f req/s | Window BW: %12s | Avg TPS: %8.0f req/s | Avg BW: %12s | Success Rate: %7.3f%% | Total Reqs: %lld\n",
+               elapsed_s, progress_pct, cpu_pct, rss_mb, interval_tps, interval_bps_human, cumul_tps, cumul_bps_human, success_rate, current_total);
     } else {
-        printf("[Monitor] RunTime: %8.1fs | Process:    N/A | CPU: %7.2f%% | RSS: %8.2f MB | Interval TPS: %8.2f | Interval BPS: %12.2f | Cumul TPS: %8.2f | Cumul BPS: %12.2f | Success Rate: %7.3f%% | Total Reqs: %lld\n",
-               elapsed_s, cpu_pct, rss_mb, interval_tps, interval_bps, cumul_tps, cumul_bps, success_rate, current_total);
+        printf("[Monitor] RunTime: %8.1fs | Process:    N/A | CPU: %7.2f%% | RSS: %8.2f MB | Window TPS: %8.0f req/s | Window BW: %12s | Avg TPS: %8.0f req/s | Avg BW: %12s | Success Rate: %7.3f%% | Total Reqs: %lld\n",
+               elapsed_s, cpu_pct, rss_mb, interval_tps, interval_bps_human, cumul_tps, cumul_bps_human, success_rate, current_total);
     }
 
     if (rt_fp) {
@@ -593,6 +885,8 @@ void *monitor_routine(void *arg) {
     m_args->prev_wall_s = m_args->start_wall_s;
     m_args->prev_cpu_s = process_cpu_seconds();
     m_args->logical_cpu_count = get_logical_cpu_count();
+
+    printf("[Monitor] Legend: Window TPS/BW = throughput between the last two samples; Avg TPS/BW = cumulative throughput since task start; console TPS is rounded to whole req/s; BW uses streamed bytes with auto-scaled units (Bytes/s, KB/s, MB/s, GB/s).\n");
 
     while (!m_args->stop_flag && !g_graceful_stop) {
         int i;
@@ -662,19 +956,78 @@ static int file_contains_text(const char *path, const char *needle) {
     return 0;
 }
 
-static void make_timestamp_id(const char *prefix, char *buf, size_t buf_size) {
+static void make_timestamp_value(char *buf, size_t buf_size) {
     time_t now = time(NULL);
     struct tm t_res;
     struct tm *t = localtime_r(&now, &t_res);
 
     if (t) {
-        snprintf(buf, buf_size, "%s_%04d%02d%02d_%02d%02d%02d",
-                 prefix,
+        snprintf(buf, buf_size, "%04d%02d%02d_%02d%02d%02d",
                  t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
                  t->tm_hour, t->tm_min, t->tm_sec);
     } else {
-        snprintf(buf, buf_size, "%s_UNKNOWN", prefix);
+        snprintf(buf, buf_size, "UNKNOWN");
     }
+}
+
+static void sanitize_label_component(const char *src, char *dst, size_t dst_size) {
+    size_t i = 0;
+    int prev_sep = 1;
+
+    if (!dst || dst_size == 0) return;
+    dst[0] = '\0';
+    if (!src || src[0] == '\0') {
+        snprintf(dst, dst_size, "task");
+        return;
+    }
+
+    while (*src && i + 1 < dst_size) {
+        unsigned char ch = (unsigned char)*src++;
+        if (isalnum(ch)) {
+            dst[i++] = (char)tolower(ch);
+            prev_sep = 0;
+        } else if (!prev_sep) {
+            dst[i++] = '_';
+            prev_sep = 1;
+        }
+    }
+
+    while (i > 0 && dst[i - 1] == '_') i--;
+    dst[i] = '\0';
+    if (dst[0] == '\0') snprintf(dst, dst_size, "task");
+}
+
+static void build_single_run_label(const CliOptions *cli, char *label, size_t label_size) {
+    Config cfg;
+    char size_slug[96];
+    int derived_threads;
+
+    if (!label || label_size == 0) return;
+    label[0] = '\0';
+
+    if (cli && cli->scenario_id[0] != '\0') {
+        sanitize_label_component(cli->scenario_id, label, label_size);
+        return;
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+    if (!cli || load_config(cli->config_file, &cfg) != 0) {
+        snprintf(label, label_size, "task");
+        return;
+    }
+
+    apply_cli_overrides(&cfg, cli);
+    if (cli->threads_set) derived_threads = cli->threads;
+    else if (cfg.target_user_count > 0 && cfg.threads_per_user > 0) derived_threads = cfg.target_user_count * cfg.threads_per_user;
+    else derived_threads = 0;
+
+    sanitize_label_component(cfg.object_size_spec[0] ? cfg.object_size_spec : "default", size_slug, sizeof(size_slug));
+    if (derived_threads > 0) {
+        snprintf(label, label_size, "%s_%s_%dt", test_case_to_name(cfg.test_case), size_slug, derived_threads);
+    } else {
+        snprintf(label, label_size, "%s_%s", test_case_to_name(cfg.test_case), size_slug);
+    }
+    cleanup_config_resources(&cfg);
 }
 
 static int parse_optional_int(const char *text, int *is_set) {
@@ -909,6 +1262,7 @@ static void apply_cli_overrides(Config *cfg, const CliOptions *cli) {
 
     if (cli->threads_set) {
         cfg->threads = cli->threads;
+        cfg->threads_source = CONFIG_SOURCE_CLI;
     }
     if (cli->object_size_set) {
         char errbuf[128] = {0};
@@ -916,6 +1270,7 @@ static void apply_cli_overrides(Config *cfg, const CliOptions *cli) {
             fprintf(stderr, "%s\n", errbuf);
             exit(1);
         }
+        cfg->object_size_source = CONFIG_SOURCE_CLI;
     }
 
     snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", cli->config_file);
@@ -941,17 +1296,22 @@ static void apply_suite_scenario_overrides(Config *cfg, const CliOptions *cli, c
     cfg->test_case = scenario_case;
     cfg->use_mix_mode = (cfg->test_case == TEST_CASE_MIX && cfg->mix_op_count > 0) ? 1 : 0;
     cfg->threads = scenario->threads;
+    cfg->threads_source = CONFIG_SOURCE_SUITE;
     if (parse_object_size_spec(scenario->object_size_spec, cfg, errbuf, sizeof(errbuf)) != 0) {
         fprintf(stderr, "%s\n", errbuf);
         exit(1);
     }
+    cfg->object_size_source = CONFIG_SOURCE_SUITE;
     if (scenario->run_seconds_set) {
         cfg->run_seconds = scenario->run_seconds;
+        cfg->run_seconds_source = CONFIG_SOURCE_SUITE;
     }
     if (scenario->requests_per_thread_set) {
         cfg->requests_per_thread = scenario->requests_per_thread;
+        cfg->requests_per_thread_source = CONFIG_SOURCE_SUITE;
     }
     cfg->allow_open_ended_run = scenario->allow_open_ended_run;
+    cfg->allow_open_ended_run_source = CONFIG_SOURCE_SUITE;
     cfg->analyze_longrun = scenario->analyze_longrun;
     cfg->gate_longrun = scenario->gate_longrun;
 
@@ -1104,6 +1464,7 @@ void save_benchmark_report(Config *cfg, const BenchmarkSummary *summary) {
     fprintf(fp, "  HostArch:          %s\n", cfg->host_arch);
     fprintf(fp, "  ReportDir:         %s\n", cfg->report_task_dir);
     fprintf(fp, "  LogDir:            %s\n", cfg->log_task_dir);
+    fprintf(fp, "  EffectiveConfig:   %s\n", cfg->effective_config_path[0] ? cfg->effective_config_path : "N/A");
     fprintf(fp, "  Bucket(Fixed):     %s\n", cfg->bucket_name_fixed[0] ? cfg->bucket_name_fixed : "N/A");
     fprintf(fp, "  Bucket(Prefix):    %s\n", cfg->bucket_name_prefix[0] ? cfg->bucket_name_prefix : "N/A");
     fprintf(fp, "  STS Auth Mode:     %s\n", cfg->is_temporary_token ? "true" : "false");
@@ -1276,10 +1637,12 @@ static int run_benchmark_scenario(const CliOptions *cli,
         cfg.threads = scenario->threads;
     } else if (cli->threads_set) {
         cfg.threads = cli->threads;
+        cfg.threads_source = CONFIG_SOURCE_CLI;
     } else if (cfg.threads > 0) {
         /* keep explicit total threads from simplified config */
     } else {
         cfg.threads = cfg.loaded_user_count * cfg.threads_per_user;
+        cfg.threads_source = CONFIG_SOURCE_CONFIG;
     }
     if (cfg.scenario_id[0] == '\0') {
         infer_scenario_id(&cfg, cfg.scenario_id, sizeof(cfg.scenario_id));
@@ -1305,6 +1668,14 @@ static int run_benchmark_scenario(const CliOptions *cli,
     }
     if (cfg.enable_data_validation) printf("[Config] Data Validation: ENABLED\n");
     if (cfg.enable_detail_log) printf("[Config] Detail Request Log: ENABLED\n");
+    emit_irrelevant_config_warnings(&cfg);
+
+    snprintf(cfg.effective_config_path, sizeof(cfg.effective_config_path), "%s/effective_config.md", cfg.report_task_dir);
+    if (write_effective_config_report(&cfg) != 0) {
+        LOG_ERROR("Failed to write effective config report: %s", cfg.effective_config_path);
+        goto cleanup;
+    }
+    printf("[Config] EffectiveConfig: %s\n", cfg.effective_config_path);
 
     if (validate_runtime_config(&cfg, using_explicit_total_threads, validation_error, sizeof(validation_error)) != 0) {
         LOG_ERROR("[Config Error] %s", validation_error);
@@ -1626,7 +1997,7 @@ static int run_suite_mode(const CliOptions *cli) {
     }
 
     printf("[Suite] Suite start: %s\n", suite_id);
-    make_timestamp_id("run", run_id, sizeof(run_id));
+    make_timestamp_value(run_id, sizeof(run_id));
     snprintf(suite_report_root, sizeof(suite_report_root), "%s/%s/%s", cli->output_dir, suite_id, run_id);
     snprintf(suite_log_root, sizeof(suite_log_root), "%s/%s/%s", cli->log_dir, suite_id, run_id);
     snprintf(summary_dir, sizeof(summary_dir), "%s/summary", suite_report_root);
@@ -1759,6 +2130,7 @@ static void print_usage(const char *prog) {
 int main(int argc, char **argv) {
     CliOptions cli;
     char task_id[64];
+    char task_label[128];
     char report_dir[PATH_MAX];
     char log_dir[PATH_MAX];
     int ret;
@@ -1780,9 +2152,10 @@ int main(int argc, char **argv) {
         return run_suite_mode(&cli);
     }
 
-    make_timestamp_id("task", task_id, sizeof(task_id));
-    snprintf(report_dir, sizeof(report_dir), "%s/%s", cli.output_dir, task_id);
-    snprintf(log_dir, sizeof(log_dir), "%s/%s", cli.log_dir, task_id);
+    build_single_run_label(&cli, task_label, sizeof(task_label));
+    make_timestamp_value(task_id, sizeof(task_id));
+    snprintf(report_dir, sizeof(report_dir), "%s/%s/%s", cli.output_dir, task_label, task_id);
+    snprintf(log_dir, sizeof(log_dir), "%s/%s/%s", cli.log_dir, task_label, task_id);
     ret = run_benchmark_scenario(&cli, NULL, report_dir, log_dir, NULL);
     return ret;
 }

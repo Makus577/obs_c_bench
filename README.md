@@ -17,7 +17,7 @@
 
 * **极致的并发性能 (Lock-Free Architecture)**
 * Worker 线程执行请求及本地统计数据收集时**全程无锁**，榨干压测机每一滴 CPU 性能。
-* 独立的旁路监控线程（Monitor Thread）每 3 秒无锁采集全局状态，实时输出 CPU、内存、TPS、BPS 与成功率；若任务在 3 秒内结束，会自动补写最终样本，避免短任务无采样数据。
+* 独立的旁路监控线程（Monitor Thread）每 3 秒无锁采集全局状态，实时输出 CPU、内存、TPS、带宽与成功率；控制台中的 `Window TPS/BW` 表示最近一个采样窗口的吞吐，`Avg TPS/BW` 表示自任务开始以来的累计平均吞吐，其中控制台 TPS 会四舍五入显示为整数 `req/s`，带宽会自动用 `Bytes/s`、`KB/s`、`MB/s`、`GB/s` 等单位展示；若任务在 3 秒内结束，会自动补写最终样本，避免短任务无采样数据。
 
 
 * **确定性伪随机打散 (LCG Hash Naming)**
@@ -37,7 +37,7 @@
 
 * **防爆内存的海量流水落盘 (Log Rotation)**
 * 开启 `EnableDetailLog=true` 后，支持请求级明细流水落盘。
-* 工具自动按任务时间戳创建独立隔离目录（如 `reports/task_20260224_120000/` 与 `logs/task_20260224_120000/`）。
+* 工具自动按“标签优先、时间戳下沉一层”的方式创建隔离目录；单场景默认类似 `reports/upload_1mb_2t/20260224_120000/`，suite 默认类似 `reports/<suite_id>/20260224_120000/`。
 * 单线程流水文件达到 1,000,000 行自动滚动切分（Rotation），防范长时间高并发测试导致的磁盘爆满与后处理 OOM。
 
 
@@ -242,8 +242,10 @@ advanced:
 
 默认输出目录会天然分离：
 
-* 报告目录：`reports/task_<timestamp>/`
-* 日志目录：`logs/task_<timestamp>/`
+* 报告目录：`reports/<scenario_label>/<timestamp>/`
+* 日志目录：`logs/<scenario_label>/<timestamp>/`
+
+其中 `<scenario_label>` 优先使用 `--scenario-id`，否则程序会根据操作类型、对象大小和线程数自动生成类似 `upload_1mb_128t` 的标签。
 
 也可通过 CLI 参数快速覆盖高频字段，例如：
 
@@ -304,6 +306,54 @@ advanced:
 
 参数优先级固定为：`CLI > scenario.yaml/simple_config.yaml > profile(config.dat 等) > 默认值`。
 
+### 4.0 生效配置说明产物
+
+每次真正启动 worker 前，程序都会在报告目录下生成一份 `effective_config.md`，并在控制台打印其绝对/实际输出路径。它用于回答“**最终到底用了什么配置**”。
+
+这份文件至少会覆盖以下信息：
+
+* 字段名
+* 最终值
+* 来源（`default` / `config.dat` / `CLI` / `suite`）
+* 当前场景是否生效
+* 影响说明
+* `config.dat` 中识别到的未知键
+
+当前重点覆盖的字段包括：
+
+* `RunSeconds`
+* `RequestsPerThread`
+* `AllowOpenEndedRun`
+* `Range`
+* `PartSize`
+* `PartsForEachUploadID`
+* `UploadFilePath`
+* `EnableCheckpoint`
+* `EnableDetailLog`
+* `GmAuthMode`
+* 证书路径
+* 对象大小
+* 总线程数
+
+同时，程序会在运行前结合当前 `TestCase` 输出“参数未生效/未使用”的提示。例如：
+
+* `download/get` 场景下，只有 `Range` 相关配置会参与 Range 请求；
+* `upload/put` 场景下，`Range` 不会生效；
+* `multipart` 场景下，`PartsForEachUploadID` / `PartSize` 生效；
+* `resumable` 场景下，`UploadFilePath` / `EnableCheckpoint` 生效；
+* `delete` 场景下，对象大小仅用于场景描述，不影响实际删除请求负载。
+
+### 4.0.1 常见参数影响关系
+
+| 场景 | 关键相关字段 | 常见无效字段 / 说明 |
+| --- | --- | --- |
+| `upload` | `Threads`、`ObjectSize`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `Range` 不生效；`PartsForEachUploadID` / `UploadFilePath` / `EnableCheckpoint` 默认不参与普通 PUT |
+| `download` | `Threads`、`ObjectSize`、`Range`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `PartSize`、`PartsForEachUploadID`、`UploadFilePath`、`EnableCheckpoint` 不生效 |
+| `delete` | `Threads`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `ObjectSize` 不影响删除请求本身；`Range`、`PartSize`、`PartsForEachUploadID`、`UploadFilePath`、`EnableCheckpoint` 不生效 |
+| `multipart` | `Threads`、`PartSize`、`PartsForEachUploadID`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `Range` 不生效；`UploadFilePath` / `EnableCheckpoint` 不参与普通 multipart API 流程 |
+| `resumable` | `Threads`、`PartSize`、`UploadFilePath`、`EnableCheckpoint`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `Range` 不生效；`PartsForEachUploadID` 不参与断点续传上传 |
+| `mix` | 取决于 `MixOperation` 中实际包含的子操作；`effective_config.md` 会按最终场景判断字段是否生效 | 若 `mix` 中不包含 `get`，则 `Range` 不生效；若不包含 `multipart/resumable`，相关分段参数也不生效 |
+
 ### 4.1 Suite 模式
 
 当你需要在一次执行里连续跑多组小场景时，可以使用：
@@ -322,7 +372,7 @@ advanced:
 | 概念 | 是否在 YAML 中配置 | 含义 | 例子 |
 | --- | --- | --- | --- |
 | `suite_id` | 是 | 一组场景的测试计划名 | `auth_matrix` |
-| `run_id` | 否 | 一次 suite 实际执行的运行编号，由程序启动时自动生成 | `run_20260318_220054` |
+| `run_id` | 否 | 一次 suite 实际执行的运行编号，由程序启动时自动生成 | `20260318_220054` |
 | `profile` | 是 | 一类基础环境模板，通常绑定一个 `config.dat` | `gm_mutual` |
 | `scenario` | 是 | suite 中的一条具体测试场景 | `gm_mutual_get_1mb_longrun` |
 | `scenario_id` | 是 | 单个 scenario 的稳定标识，用于输出目录和 baseline 主键 | `upload_1mb_32t` |
@@ -474,21 +524,21 @@ reporting:
 
 每次运行结束后，工具会默认生成两套**同名任务目录**：
 
-* 报告目录：`reports/task_20260224_123045/`
-* 日志目录：`logs/task_20260224_123045/`
+* 报告目录：`reports/upload_1mb_128t/20260224_123045/`
+* 日志目录：`logs/upload_1mb_128t/20260224_123045/`
 
 默认文件归属如下：
 
-* `reports/task_xxx/archive.csv`: 任务级结构化归档文件，便于后续批量汇总与自动分析。
-* `reports/task_xxx/brief.txt`: 全局配置与最终汇总报告。
-* `logs/task_xxx/realtime.txt`: 每 3 秒一次的实时采样日志；若任务在 3 秒内结束，会补写最后一条样本。
-* `logs/task_xxx/detail_X_partY.csv`: 高性能、多线程切割的请求级明细日志。
+* `reports/<scenario_label>/<timestamp>/archive.csv`: 任务级结构化归档文件，便于后续批量汇总与自动分析。
+* `reports/<scenario_label>/<timestamp>/brief.txt`: 全局配置与最终汇总报告，同时会记录 `effective_config.md` 的路径。
+* `logs/<scenario_label>/<timestamp>/realtime.txt`: 每 3 秒一次的实时采样日志；若任务在 3 秒内结束，会补写最后一条样本。
+* `logs/<scenario_label>/<timestamp>/detail_X_partY.csv`: 高性能、多线程切割的请求级明细日志。
 
 在 suite 模式下，输出目录按 suite 组织：
 
-* `reports/<suite_id>/<run_id>/summary/`
-* `reports/<suite_id>/<run_id>/scenarios/<scenario_id>/`
-* `logs/<suite_id>/<run_id>/scenarios/<scenario_id>/`
+* `reports/<suite_id>/<timestamp>/summary/`
+* `reports/<suite_id>/<timestamp>/scenarios/<scenario_id>/`
+* `logs/<suite_id>/<timestamp>/scenarios/<scenario_id>/`
 
 若使用 `--output-dir` 或 `--log-dir`，则仅替换对应类别文件的根目录，任务子目录名仍保持一致。
 
@@ -499,10 +549,27 @@ reporting:
 面向人工阅读，记录：
 
 * 本次任务的生效配置
+* `effective_config.md` 的落盘路径
 * 最终请求统计
 * CPU / RSS / TPS / BPS / 平均时延 / P99 / 单流带宽摘要
 
 `brief.txt` 是最终摘要报告，不是中间文件。
+
+#### `effective_config.md`
+
+面向“运行前解释”的 Markdown 说明文件，记录：
+
+* 最终 `TestCase`、执行模式、报告目录、日志目录
+* 重点字段的最终值与来源
+* 当前场景下该字段是否真正生效
+* 每个字段的影响说明
+* `config.dat` 中无法识别的键列表
+
+它适合在以下场景使用：
+
+* 排查 CLI / suite / `config.dat` 谁覆盖了谁
+* 确认 `Range`、`PartSize`、`UploadFilePath` 等参数在当前操作下是否真的参与执行
+* 在 CI 或批量压测中保存“运行前的最终决议配置”
 
 #### `realtime.txt`
 
@@ -522,13 +589,20 @@ CSV 格式，列定义如下：
 * `Success_Rate(%)`: 当前累计成功率
 * `Total_Reqs`: 当前累计请求数
 
+控制台实时回显会对同一组指标做更易读的展示：
+
+* `Window TPS`: 最近一个采样窗口内的请求吞吐，单位 `req/s`，控制台按四舍五入后的整数展示
+* `Window BW`: 最近一个采样窗口内的带宽，基于 `streamed_bytes` 自动换算成人类可读单位
+* `Avg TPS`: 从任务启动到当前采样点的累计平均请求吞吐，单位 `req/s`，控制台按四舍五入后的整数展示
+* `Avg BW`: 从任务启动到当前采样点的累计平均带宽，基于 `streamed_bytes` 自动换算成人类可读单位
+
 `realtime.txt` 是运行期采样日志，不是中间文件。
 
 #### `archive.csv`
 
 单任务一行，用于机器可读归档。当前字段包括：
 
-* `task_id`
+* `task_id`（当前运行实例目录的时间戳标识，如 `20260319_211219`）
 * `start_time`
 * `config_file`
 * `users_file`
