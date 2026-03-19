@@ -61,6 +61,13 @@ typedef struct {
     char request_id[64];
 } ReqRecord;
 
+typedef enum {
+    CONFIG_SOURCE_DEFAULT = 0,
+    CONFIG_SOURCE_CONFIG = 1,
+    CONFIG_SOURCE_CLI = 2,
+    CONFIG_SOURCE_SUITE = 3
+} ConfigValueSource;
+
 typedef struct {
     char endpoint[256];
     char protocol[16];
@@ -139,6 +146,27 @@ typedef struct {
     char git_commit[64];
     char host_os[64];
     char host_arch[64];
+    char effective_config_path[PATH_MAX];
+    char unknown_config_keys[32][64];
+    int unknown_config_key_count;
+    int run_seconds_source;
+    int requests_per_thread_source;
+    int allow_open_ended_run_source;
+    int range_source;
+    int part_size_source;
+    int parts_for_each_upload_id_source;
+    int upload_file_path_source;
+    int enable_checkpoint_source;
+    int enable_detail_log_source;
+    int gm_auth_mode_source;
+    int server_cert_path_source;
+    int client_sign_cert_path_source;
+    int client_sign_key_path_source;
+    int client_sign_key_password_source;
+    int client_enc_cert_path_source;
+    int client_enc_key_path_source;
+    int object_size_source;
+    int threads_source;
 
 } Config;
 
