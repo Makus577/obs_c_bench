@@ -268,8 +268,8 @@ class BenchmarkTester:
         print("=" * 60)
 
         bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
-        existing_logs = set(d for d in os.listdir("logs") if d.startswith("task_")) if os.path.exists("logs") else set()
-        existing_reports = set(d for d in os.listdir("reports") if d.startswith("task_")) if os.path.exists("reports") else set()
+        existing_logs = set(os.listdir("logs")) if os.path.exists("logs") else set()
+        existing_reports = set(os.listdir("reports")) if os.path.exists("reports") else set()
         custom_report_root = os.path.join(self.work_dir, "test_reports_out")
         custom_log_root = os.path.join(self.work_dir, "test_logs_out")
         if os.path.exists(custom_report_root):
@@ -287,8 +287,8 @@ class BenchmarkTester:
             print(output)
             return False
 
-        new_logs = sorted(set(d for d in os.listdir("logs") if d.startswith("task_")) - existing_logs)
-        new_reports = sorted(set(d for d in os.listdir("reports") if d.startswith("task_")) - existing_reports)
+        new_logs = sorted(set(os.listdir("logs")) - existing_logs) if os.path.exists("logs") else []
+        new_reports = sorted(set(os.listdir("reports")) - existing_reports) if os.path.exists("reports") else []
         if new_logs:
             print("[FAIL] Default logs directory should not receive task output when --log-dir is used.")
             return False
@@ -300,17 +300,23 @@ class BenchmarkTester:
             print("[FAIL] Custom output roots were not created.")
             return False
 
-        report_tasks = sorted(d for d in os.listdir(custom_report_root) if d.startswith("task_"))
-        log_tasks = sorted(d for d in os.listdir(custom_log_root) if d.startswith("task_"))
+        scenario_label = "smoke_upload_1mb_2t"
+        report_label_dir = os.path.join(custom_report_root, scenario_label)
+        log_label_dir = os.path.join(custom_log_root, scenario_label)
+        if not os.path.isdir(report_label_dir) or not os.path.isdir(log_label_dir):
+            print("[FAIL] Missing scenario label directories under custom report/log roots.")
+            return False
+        report_tasks = sorted(os.listdir(report_label_dir))
+        log_tasks = sorted(os.listdir(log_label_dir))
         if not report_tasks or not log_tasks:
-            print("[FAIL] Missing task directories under custom report/log roots.")
+            print("[FAIL] Missing timestamp directories under custom report/log label roots.")
             return False
         if report_tasks[-1] != log_tasks[-1]:
             print("[FAIL] Report and log task ids do not match.")
             return False
 
-        report_dir = os.path.join(custom_report_root, report_tasks[-1])
-        log_dir = os.path.join(custom_log_root, log_tasks[-1])
+        report_dir = os.path.join(report_label_dir, report_tasks[-1])
+        log_dir = os.path.join(log_label_dir, log_tasks[-1])
         archive_path = os.path.join(report_dir, "archive.csv")
         brief_path = os.path.join(report_dir, "brief.txt")
         effective_config_path = os.path.join(report_dir, "effective_config.md")

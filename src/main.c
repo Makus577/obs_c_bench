@@ -95,6 +95,9 @@ typedef struct {
     char log_dir[PATH_MAX];
 } ScenarioRunResult;
 
+static void cleanup_config_resources(Config *cfg);
+static void apply_cli_overrides(Config *cfg, const CliOptions *cli);
+
 void handle_sigint(int sig) {
     static volatile sig_atomic_t sigint_count = 0;
     (void)sig;
@@ -775,6 +778,8 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     double success_rate = 0.0;
     double progress_pct;
     Config *cfg;
+    char interval_bps_human[64];
+    char cumul_bps_human[64];
 
     gather_thread_counters(m_args, &current_success, &current_fail, &current_streamed_bytes);
     current_total = current_success + current_fail;
@@ -800,6 +805,8 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     if (current_total > 0) {
         success_rate = ((double)current_success / current_total) * 100.0;
     }
+    format_rate_si(interval_bps, interval_bps_human, sizeof(interval_bps_human));
+    format_rate_si(cumul_bps, cumul_bps_human, sizeof(cumul_bps_human));
 
     if (interval_tps > m_args->peak_tps) m_args->peak_tps = interval_tps;
     if (interval_bps > m_args->peak_bps) m_args->peak_bps = interval_bps;
@@ -829,11 +836,11 @@ static void emit_monitor_snapshot(MonitorArgs *m_args, FILE *rt_fp, int force_sn
     }
 
     if (progress_pct >= 0.0) {
-        printf("[Monitor] RunTime: %8.1fs | Process: %6.2f%% | CPU: %7.2f%% | RSS: %8.2f MB | Interval TPS: %8.2f | Interval BPS: %12.2f | Cumul TPS: %8.2f | Cumul BPS: %12.2f | Success Rate: %7.3f%% | Total Reqs: %lld\n",
-               elapsed_s, progress_pct, cpu_pct, rss_mb, interval_tps, interval_bps, cumul_tps, cumul_bps, success_rate, current_total);
+        printf("[Monitor] RunTime: %8.1fs | Process: %6.2f%% | CPU: %7.2f%% | RSS: %8.2f MB | Window TPS: %8.0f req/s | Window BW: %12s | Avg TPS: %8.0f req/s | Avg BW: %12s | Success Rate: %7.3f%% | Total Reqs: %lld\n",
+               elapsed_s, progress_pct, cpu_pct, rss_mb, interval_tps, interval_bps_human, cumul_tps, cumul_bps_human, success_rate, current_total);
     } else {
-        printf("[Monitor] RunTime: %8.1fs | Process:    N/A | CPU: %7.2f%% | RSS: %8.2f MB | Interval TPS: %8.2f | Interval BPS: %12.2f | Cumul TPS: %8.2f | Cumul BPS: %12.2f | Success Rate: %7.3f%% | Total Reqs: %lld\n",
-               elapsed_s, cpu_pct, rss_mb, interval_tps, interval_bps, cumul_tps, cumul_bps, success_rate, current_total);
+        printf("[Monitor] RunTime: %8.1fs | Process:    N/A | CPU: %7.2f%% | RSS: %8.2f MB | Window TPS: %8.0f req/s | Window BW: %12s | Avg TPS: %8.0f req/s | Avg BW: %12s | Success Rate: %7.3f%% | Total Reqs: %lld\n",
+               elapsed_s, cpu_pct, rss_mb, interval_tps, interval_bps_human, cumul_tps, cumul_bps_human, success_rate, current_total);
     }
 
     if (rt_fp) {
@@ -876,6 +883,8 @@ void *monitor_routine(void *arg) {
     m_args->prev_wall_s = m_args->start_wall_s;
     m_args->prev_cpu_s = process_cpu_seconds();
     m_args->logical_cpu_count = get_logical_cpu_count();
+
+    printf("[Monitor] Legend: Window TPS/BW = throughput between the last two samples; Avg TPS/BW = cumulative throughput since task start; console TPS is rounded to whole req/s; BW uses streamed bytes with auto-scaled units (Bytes/s, KB/s, MB/s, GB/s).\n");
 
     while (!m_args->stop_flag && !g_graceful_stop) {
         int i;
@@ -945,19 +954,78 @@ static int file_contains_text(const char *path, const char *needle) {
     return 0;
 }
 
-static void make_timestamp_id(const char *prefix, char *buf, size_t buf_size) {
+static void make_timestamp_value(char *buf, size_t buf_size) {
     time_t now = time(NULL);
     struct tm t_res;
     struct tm *t = localtime_r(&now, &t_res);
 
     if (t) {
-        snprintf(buf, buf_size, "%s_%04d%02d%02d_%02d%02d%02d",
-                 prefix,
+        snprintf(buf, buf_size, "%04d%02d%02d_%02d%02d%02d",
                  t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
                  t->tm_hour, t->tm_min, t->tm_sec);
     } else {
-        snprintf(buf, buf_size, "%s_UNKNOWN", prefix);
+        snprintf(buf, buf_size, "UNKNOWN");
     }
+}
+
+static void sanitize_label_component(const char *src, char *dst, size_t dst_size) {
+    size_t i = 0;
+    int prev_sep = 1;
+
+    if (!dst || dst_size == 0) return;
+    dst[0] = '\0';
+    if (!src || src[0] == '\0') {
+        snprintf(dst, dst_size, "task");
+        return;
+    }
+
+    while (*src && i + 1 < dst_size) {
+        unsigned char ch = (unsigned char)*src++;
+        if (isalnum(ch)) {
+            dst[i++] = (char)tolower(ch);
+            prev_sep = 0;
+        } else if (!prev_sep) {
+            dst[i++] = '_';
+            prev_sep = 1;
+        }
+    }
+
+    while (i > 0 && dst[i - 1] == '_') i--;
+    dst[i] = '\0';
+    if (dst[0] == '\0') snprintf(dst, dst_size, "task");
+}
+
+static void build_single_run_label(const CliOptions *cli, char *label, size_t label_size) {
+    Config cfg;
+    char size_slug[96];
+    int derived_threads;
+
+    if (!label || label_size == 0) return;
+    label[0] = '\0';
+
+    if (cli && cli->scenario_id[0] != '\0') {
+        sanitize_label_component(cli->scenario_id, label, label_size);
+        return;
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+    if (!cli || load_config(cli->config_file, &cfg) != 0) {
+        snprintf(label, label_size, "task");
+        return;
+    }
+
+    apply_cli_overrides(&cfg, cli);
+    if (cli->threads_set) derived_threads = cli->threads;
+    else if (cfg.target_user_count > 0 && cfg.threads_per_user > 0) derived_threads = cfg.target_user_count * cfg.threads_per_user;
+    else derived_threads = 0;
+
+    sanitize_label_component(cfg.object_size_spec[0] ? cfg.object_size_spec : "default", size_slug, sizeof(size_slug));
+    if (derived_threads > 0) {
+        snprintf(label, label_size, "%s_%s_%dt", test_case_to_name(cfg.test_case), size_slug, derived_threads);
+    } else {
+        snprintf(label, label_size, "%s_%s", test_case_to_name(cfg.test_case), size_slug);
+    }
+    cleanup_config_resources(&cfg);
 }
 
 static int parse_optional_int(const char *text, int *is_set) {
@@ -1902,7 +1970,7 @@ static int run_suite_mode(const CliOptions *cli) {
     }
 
     printf("[Suite] Suite start: %s\n", suite_id);
-    make_timestamp_id("run", run_id, sizeof(run_id));
+    make_timestamp_value(run_id, sizeof(run_id));
     snprintf(suite_report_root, sizeof(suite_report_root), "%s/%s/%s", cli->output_dir, suite_id, run_id);
     snprintf(suite_log_root, sizeof(suite_log_root), "%s/%s/%s", cli->log_dir, suite_id, run_id);
     snprintf(summary_dir, sizeof(summary_dir), "%s/summary", suite_report_root);
@@ -2035,6 +2103,7 @@ static void print_usage(const char *prog) {
 int main(int argc, char **argv) {
     CliOptions cli;
     char task_id[64];
+    char task_label[128];
     char report_dir[PATH_MAX];
     char log_dir[PATH_MAX];
     int ret;
@@ -2056,9 +2125,10 @@ int main(int argc, char **argv) {
         return run_suite_mode(&cli);
     }
 
-    make_timestamp_id("task", task_id, sizeof(task_id));
-    snprintf(report_dir, sizeof(report_dir), "%s/%s", cli.output_dir, task_id);
-    snprintf(log_dir, sizeof(log_dir), "%s/%s", cli.log_dir, task_id);
+    build_single_run_label(&cli, task_label, sizeof(task_label));
+    make_timestamp_value(task_id, sizeof(task_id));
+    snprintf(report_dir, sizeof(report_dir), "%s/%s/%s", cli.output_dir, task_label, task_id);
+    snprintf(log_dir, sizeof(log_dir), "%s/%s/%s", cli.log_dir, task_label, task_id);
     ret = run_benchmark_scenario(&cli, NULL, report_dir, log_dir, NULL);
     return ret;
 }
