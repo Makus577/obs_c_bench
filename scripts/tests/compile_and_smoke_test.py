@@ -313,6 +313,7 @@ class BenchmarkTester:
         log_dir = os.path.join(custom_log_root, log_tasks[-1])
         archive_path = os.path.join(report_dir, "archive.csv")
         brief_path = os.path.join(report_dir, "brief.txt")
+        effective_config_path = os.path.join(report_dir, "effective_config.md")
         realtime_path = os.path.join(log_dir, "realtime.txt")
 
         if not os.path.exists(archive_path):
@@ -321,12 +322,16 @@ class BenchmarkTester:
         if not os.path.exists(brief_path):
             print(f"[FAIL] Missing brief.txt in {report_dir}")
             return False
+        if not os.path.exists(effective_config_path):
+            print(f"[FAIL] Missing effective_config.md in {report_dir}")
+            return False
         if not os.path.exists(realtime_path):
             print(f"[FAIL] Missing realtime.txt in {log_dir}")
             return False
 
         archive_text = open(archive_path, "r", encoding="utf-8").read()
         brief_text = open(brief_path, "r", encoding="utf-8").read()
+        effective_config_text = open(effective_config_path, "r", encoding="utf-8").read()
         realtime_text = open(realtime_path, "r", encoding="utf-8").read()
         if "object_size_spec" not in archive_text or ",1MB," not in archive_text:
             print("[FAIL] archive.csv missing object size override evidence.")
@@ -345,6 +350,15 @@ class BenchmarkTester:
             return False
         if "MB/s" not in brief_text and "KB/s" not in brief_text and "Bytes/s" not in brief_text:
             print("[FAIL] brief.txt missing human-readable rate unit.")
+            return False
+        if "EffectiveConfig:" not in brief_text or "effective_config.md" not in brief_text:
+            print("[FAIL] brief.txt missing effective config path.")
+            return False
+        if "[Config] EffectiveConfig:" not in output:
+            print("[FAIL] Console output missing effective config path.")
+            return False
+        if "RunSeconds" not in effective_config_text or "Threads" not in effective_config_text or "EnableDetailLog" not in effective_config_text:
+            print("[FAIL] effective_config.md missing key effective fields.")
             return False
 
         print(f"[PASS] Split output verification succeeded: reports={report_dir} logs={log_dir}")
@@ -563,9 +577,19 @@ reporting:
         if "Effective RunSeconds: 2" not in output or "LongrunEnabled: true" not in output:
             print("[FAIL] Suite console output missing effective longrun diagnostics.")
             return False
+        if "[Config] EffectiveConfig:" not in output:
+            print("[FAIL] Suite console output missing effective config path.")
+            return False
         brief_text = open(os.path.join(scenario_dir, "brief.txt"), "r", encoding="utf-8").read()
         if "RunSeconds:        2" not in brief_text or "LongrunEnabled:    true" not in brief_text:
             print("[FAIL] brief.txt missing effective runtime or longrun markers.")
+            return False
+        if "EffectiveConfig:" not in brief_text or "effective_config.md" not in brief_text:
+            print("[FAIL] brief.txt missing effective config path.")
+            return False
+        effective_config_path = os.path.join(scenario_dir, "effective_config.md")
+        if not os.path.exists(effective_config_path):
+            print("[FAIL] Missing effective_config.md under suite scenario output.")
             return False
 
         with open(os.path.join(scenario_dir, "longrun_summary.json"), "r", encoding="utf-8") as handle:
@@ -1008,6 +1032,9 @@ reporting:
                 print(output)
                 print("[FAIL] Missing effective longrun diagnostics in console output.")
                 return False
+            if "[Config] EffectiveConfig:" not in output:
+                print("[FAIL] Missing effective config path in console output.")
+                return False
             suite_root = os.path.join(reports_root, expected_suite_id)
             run_dirs = sorted(os.listdir(suite_root))
             run_dir = os.path.join(suite_root, run_dirs[-1])
@@ -1015,6 +1042,12 @@ reporting:
             brief_text = open(os.path.join(scenario_dir, "brief.txt"), "r", encoding="utf-8").read()
             if "RunSeconds:        10" not in brief_text or "LongrunEnabled:    true" not in brief_text:
                 print("[FAIL] brief.txt missing effective longrun runtime markers.")
+                return False
+            if "EffectiveConfig:" not in brief_text or "effective_config.md" not in brief_text:
+                print("[FAIL] brief.txt missing effective config path.")
+                return False
+            if not os.path.exists(os.path.join(scenario_dir, "effective_config.md")):
+                print("[FAIL] Missing effective_config.md under longrun scenario output.")
                 return False
             summary_text = open(os.path.join(run_dir, "summary", "suite_summary.csv"), "r", encoding="utf-8").read()
             if "run_seconds" not in summary_text or "10" not in summary_text:
