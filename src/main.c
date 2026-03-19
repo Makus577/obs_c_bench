@@ -42,6 +42,8 @@ typedef struct {
 typedef struct {
     char config_file[PATH_MAX];
     char users_file[PATH_MAX];
+    int config_set;
+    int users_set;
     char output_dir[PATH_MAX];
     char log_dir[PATH_MAX];
     char suite_file[PATH_MAX];
@@ -1144,6 +1146,21 @@ static void cleanup_config_resources(Config *cfg) {
     }
 }
 
+static int resolve_default_config_path(char *out, size_t out_size) {
+    const char *candidates[] = {"scenario.yaml", "simple_config.yaml", "config.dat"};
+    size_t i;
+
+    if (!out || out_size == 0) return -1;
+    for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (access(candidates[i], R_OK) == 0) {
+            snprintf(out, out_size, "%s", candidates[i]);
+            return 0;
+        }
+    }
+    snprintf(out, out_size, "%s", "config.dat");
+    return 0;
+}
+
 static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
     static struct option long_options[] = {
         {"config", required_argument, 0, 'c'},
@@ -1160,8 +1177,8 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
     int opt;
 
     memset(cli, 0, sizeof(*cli));
-    snprintf(cli->config_file, sizeof(cli->config_file), "config.dat");
-    snprintf(cli->users_file, sizeof(cli->users_file), "users.dat");
+    resolve_default_config_path(cli->config_file, sizeof(cli->config_file));
+    snprintf(cli->users_file, sizeof(cli->users_file), "%s", "users.dat");
     snprintf(cli->output_dir, sizeof(cli->output_dir), "reports");
     snprintf(cli->log_dir, sizeof(cli->log_dir), "logs");
 
@@ -1169,9 +1186,11 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
         switch (opt) {
             case 'c':
                 snprintf(cli->config_file, sizeof(cli->config_file), "%s", optarg);
+                cli->config_set = 1;
                 break;
             case 'u':
                 snprintf(cli->users_file, sizeof(cli->users_file), "%s", optarg);
+                cli->users_set = 1;
                 break;
             case 'o':
                 if (parse_test_case_arg(optarg, &cli->op) != 0) {
@@ -1220,8 +1239,9 @@ static int parse_cli_options(int argc, char **argv, CliOptions *cli) {
         } else if (!cli->op_set && parse_test_case_arg(argv[optind], &parsed_case) == 0) {
             cli->op = parsed_case;
             cli->op_set = 1;
-        } else if (strcmp(cli->config_file, "config.dat") == 0) {
+        } else if (!cli->config_set) {
             snprintf(cli->config_file, sizeof(cli->config_file), "%s", argv[optind]);
+            cli->config_set = 1;
         } else {
             fprintf(stderr, "Unexpected positional argument: %s\n", argv[optind]);
             return -1;
@@ -1254,7 +1274,7 @@ static void apply_cli_overrides(Config *cfg, const CliOptions *cli) {
     }
 
     snprintf(cfg->config_file_path, sizeof(cfg->config_file_path), "%s", cli->config_file);
-    if (!cfg->is_temporary_token) {
+    if (!cfg->is_temporary_token && (cli->users_set || cfg->users_file_path[0] == '\0')) {
         snprintf(cfg->users_file_path, sizeof(cfg->users_file_path), "%s", cli->users_file);
     }
     if (cli->scenario_id[0] != '\0') {
@@ -1597,8 +1617,13 @@ static int run_benchmark_scenario(const CliOptions *cli,
         snprintf(cfg.users_file_path, sizeof(cfg.users_file_path), "%s", "temptoken.dat");
         if (load_users_file(cfg.users_file_path, &cfg, 1) < 0) goto cleanup;
     } else {
-        const char *users_path = scenario && scenario->users_file[0] ? scenario->users_file : cli->users_file;
-        snprintf(cfg.users_file_path, sizeof(cfg.users_file_path), "%s", users_path);
+        const char *users_path = NULL;
+        if (scenario && scenario->users_file[0]) users_path = scenario->users_file;
+        else if (cli->users_set || cfg.users_file_path[0] == '\0') users_path = cli->users_file;
+        else users_path = cfg.users_file_path;
+        if (users_path != cfg.users_file_path) {
+            snprintf(cfg.users_file_path, sizeof(cfg.users_file_path), "%s", users_path);
+        }
         if (load_users_file(cfg.users_file_path, &cfg, 0) < 0) goto cleanup;
     }
 
@@ -1607,15 +1632,17 @@ static int run_benchmark_scenario(const CliOptions *cli,
         goto cleanup;
     }
 
-    using_explicit_total_threads = (scenario != NULL || cli->threads_set);
+    using_explicit_total_threads = (scenario != NULL || cli->threads_set || cfg.threads > 0);
     if (scenario) {
         cfg.threads = scenario->threads;
-    } else if (!cli->threads_set) {
-        cfg.threads = cfg.loaded_user_count * cfg.threads_per_user;
-        cfg.threads_source = CONFIG_SOURCE_CONFIG;
-    } else {
+    } else if (cli->threads_set) {
         cfg.threads = cli->threads;
         cfg.threads_source = CONFIG_SOURCE_CLI;
+    } else if (cfg.threads > 0) {
+        /* keep explicit total threads from simplified config */
+    } else {
+        cfg.threads = cfg.loaded_user_count * cfg.threads_per_user;
+        cfg.threads_source = CONFIG_SOURCE_CONFIG;
     }
     if (cfg.scenario_id[0] == '\0') {
         infer_scenario_id(&cfg, cfg.scenario_id, sizeof(cfg.scenario_id));
@@ -2094,7 +2121,7 @@ static int run_suite_mode(const CliOptions *cli) {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s [config.dat|testcase] [--config FILE] [--users FILE] [--op OP] [--threads N] [--object-size SPEC] [--output-dir DIR] [--log-dir DIR]\n",
+            "Usage: %s [scenario.yaml|simple_config.yaml|config.dat|testcase] [--config FILE] [--users FILE] [--op OP] [--threads N] [--object-size SPEC] [--output-dir DIR] [--log-dir DIR]\n",
             prog);
     fprintf(stderr, "       %s [--scenario-id ID]\n", prog);
     fprintf(stderr, "       %s [--suite FILE]\n", prog);

@@ -4,7 +4,7 @@
 
 当前版本已支持：
 
-* 通过 CLI 显式指定 `config.dat` / `users.dat`
+* 通过 CLI 显式指定 `scenario.yaml` / `simple_config.yaml` / `config.dat` / `users.dat`
 * 用命令行覆盖操作类型、总并发数、对象大小
 * 通过 CLI 分别指定报告导出目录和日志目录
 * 通过 `archive.csv`、基线清单与门禁脚本做性能基线对比
@@ -94,7 +94,7 @@ make asan
 
 ```bash
 make mock
-./obs_c_bench_mock --config ./config.dat --op upload
+./obs_c_bench_mock --config ./scenario.yaml --op upload
 ```
 
 #### 2. 需要真实 OBS 压测时，一键 bootstrap
@@ -174,26 +174,70 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 ```
 
-### 2. 调整测试计划 (`config.dat`)
+### 2. 默认使用简化单场景配置 (`scenario.yaml`)
 
-编辑 `config.dat`，设置目标 Endpoint、并发量及测试动作。核心参数如下：
+推荐在根目录创建 `scenario.yaml`（或 `simple_config.yaml`）。如果未显式传 `--config`，程序会按 `scenario.yaml` → `simple_config.yaml` → `config.dat` 的顺序查找默认配置入口。
 
-* `Users=1`：加载 `users.dat` 中的几个用户。
-* `ThreadsPerUser=1000`：每个用户启动的并发线程数。
-* `TestCase=201`：压测动作 (201=PUT, 202=GET, 204=DELETE, 216=MULTIPART, 230=RESUMABLE, 900=MIX)。
-* `ObjectSize=4096`：测试对象的大小 (支持范围配置，如 `1024~4096`)。
-* `RequestsPerThread=10000` 或 `RunSeconds=300`：退出条件限制。
-* `AllowOpenEndedRun=true`：仅当你明确需要手动 `Ctrl+C` 停止时才开启开放式运行；默认不允许 `RunSeconds<=0` 且 `RequestsPerThread<=0` 的组合。
+简化配置面向高频字段，默认只暴露：
 
-*(注：详细配置说明请参考 `config.dat` 文件内的中文注释)*
+* `profile`：继承一个已有高级配置文件，通常仍指向兼容模式的 `config.dat`。
+* `users` / `users_file`：用户凭证文件路径。
+* `op`、`threads`、`object_size`、`requests_per_thread`、`run_seconds`、`scenario_id`。
+* `advanced:`：承载 multipart、Range、checkpoint、timeout、日志等低频实现参数。
+* `security:`：承载 `GmAuthMode`、证书路径等认证相关参数。
+
+下面给出 3 个最小示例。
+
+#### 示例 A：最小上传压测
+
+```yaml
+profile: ./config.dat
+users: ./users.dat
+op: upload
+threads: 128
+object_size: 1MB
+requests_per_thread: 100
+scenario_id: upload_1mb_128t
+```
+
+#### 示例 B：最小下载压测
+
+```yaml
+profile: ./config.dat
+users: ./users.dat
+op: download
+threads: 64
+object_size: 4MB
+requests_per_thread: 200
+scenario_id: download_4mb_64t
+advanced:
+  range: 0-1048575
+  enable_data_validation: true
+```
+
+#### 示例 C：长稳压测
+
+```yaml
+profile: ./config.dat
+users: ./users.dat
+op: upload
+threads: 256
+object_size: 1MB
+run_seconds: 3600
+scenario_id: upload_longrun_1h
+advanced:
+  analyze_longrun: true
+  gate_longrun: true
+```
+
+> 说明：`config.dat` 仍被完整支持，但建议将其视为**高级/兼容模式**。适合承载 Endpoint、桶路由、证书、multipart、Range、断点续传、超时等低频实现参数，并作为 `profile` 被 `scenario.yaml` 继承。
 
 ### 3. 执行压测
 
-工具默认读取当前目录下的 `config.dat`：
+若当前目录存在 `scenario.yaml`，可以直接执行：
 
 ```bash
 ./obs_c_bench
-
 ```
 
 默认输出目录会天然分离：
@@ -203,19 +247,11 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 其中 `<scenario_label>` 优先使用 `--scenario-id`，否则程序会根据操作类型、对象大小和线程数自动生成类似 `upload_1mb_128t` 的标签。
 
-也可通过 CLI 参数快速覆盖 TestCase，方便脚本串联执行 (例如先跑 201 PUT，再跑 202 GET)：
-
-```bash
-./obs_c_bench 201
-./obs_c_bench 202
-
-```
-
-也支持显式指定配置文件、用户文件和覆盖关键参数：
+也可通过 CLI 参数快速覆盖高频字段，例如：
 
 ```bash
 ./obs_c_bench \
-  --config ./config.dat \
+  --config ./scenario.yaml \
   --users ./users.dat \
   --op upload \
   --threads 128 \
@@ -226,14 +262,40 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 其中 `--object-size` 支持纯字节数和十进制单位范围，例如 `512KB`、`1MB`、`1MB~16MB`。
 
-执行前会做配置合理性校验。若 `RunSeconds<=0` 且 `RequestsPerThread<=0`，工具默认会直接失败，避免误跑成无终止条件；只有在 `config.dat` 中显式设置 `AllowOpenEndedRun=true`，或在 suite YAML 中显式设置 `allow_open_ended_run: true` 时，才允许开放式运行。
+执行前会做配置合理性校验。若 `RunSeconds<=0` 且 `RequestsPerThread<=0`，工具默认会直接失败，避免误跑成无终止条件；只有在 `config.dat` 中显式设置 `AllowOpenEndedRun=true`、在 `scenario.yaml` / `simple_config.yaml` 中设置 `allow_open_ended_run: true`，或在 suite YAML 中显式设置 `allow_open_ended_run: true` 时，才允许开放式运行。
 
-### 4. CLI 参数说明
+### 4. 简化配置与兼容配置的边界
+
+#### 常用工作负载字段（建议优先放在 `scenario.yaml`）
+
+* `profile`
+* `users` / `users_file`
+* `op` / `test_case`
+* `threads`
+* `object_size`
+* `run_seconds`
+* `requests_per_thread`
+* `scenario_id`
+
+#### 高级实现字段（建议放在 `profile` 或 `advanced:` / `security:`）
+
+* `endpoint`、`protocol`、`keep_alive`
+* `connect_timeout_sec`、`request_timeout_sec`
+* `users_count`、`threads_per_user`
+* `range`、`part_size`、`parts_for_each_upload_id`
+* `key_prefix`、`bucket_name_prefix`、`bucket_name_fixed`、`obj_name_pattern_hash`
+* `enable_checkpoint`、`upload_file_path`、`resumable_task_num`
+* `mix_operation`、`mix_loop_count`、`allow_open_ended_run`
+* `enable_data_validation`、`enable_detail_log`、`log_level`
+* `gm_auth_mode`、`server_cert_path`、`client_sign_cert_path`、`client_sign_key_path`、`client_sign_key_password`、`client_enc_cert_path`、`client_enc_key_path`
+* `analyze_longrun`、`gate_longrun`
+
+### 5. CLI 参数说明
 
 | 参数 | 说明 | 示例 |
 | --- | --- | --- |
-| `--config <path>` | 指定配置文件路径，默认 `config.dat` | `--config ./conf/config.dat` |
-| `--users <path>` | 指定用户文件路径，默认 `users.dat` | `--users ./accounts/users.dat` |
+| `--config <path>` | 指定配置文件路径；默认按 `scenario.yaml` → `simple_config.yaml` → `config.dat` 查找 | `--config ./scenario.yaml` |
+| `--users <path>` | 指定用户文件路径；若未传，则优先使用简化配置中的 `users` / `users_file`，否则回退到 `users.dat` | `--users ./accounts/users.dat` |
 | `--op <value>` | 覆盖操作类型，支持 `upload/download/delete/multipart/resumable/mix` 或 `201/202/204/216/230/900` | `--op upload` |
 | `--threads <N>` | 覆盖总并发线程数；多用户时会按用户均分，余数从前往后补齐 | `--threads 1024` |
 | `--object-size <spec>` | 覆盖对象大小，支持纯字节数、十进制单位和区间 | `--object-size 1MB~16MB` |
@@ -242,7 +304,7 @@ user2, YOUR_AK_2, YOUR_SK_2
 | `--output-dir <path>` | 仅控制报告导出目录，作用于 `archive.csv`、`brief.txt` | `--output-dir /data/reports` |
 | `--log-dir <path>` | 仅控制日志目录，作用于 `realtime.txt`、`detail_*.csv` | `--log-dir /data/logs` |
 
-参数优先级固定为：`CLI > config.dat > 默认值`。
+参数优先级固定为：`CLI > scenario.yaml/simple_config.yaml > profile(config.dat 等) > 默认值`。
 
 ### 4.0 生效配置说明产物
 
