@@ -244,6 +244,54 @@ user2, YOUR_AK_2, YOUR_SK_2
 
 参数优先级固定为：`CLI > config.dat > 默认值`。
 
+### 4.0 生效配置说明产物
+
+每次真正启动 worker 前，程序都会在报告目录下生成一份 `effective_config.md`，并在控制台打印其绝对/实际输出路径。它用于回答“**最终到底用了什么配置**”。
+
+这份文件至少会覆盖以下信息：
+
+* 字段名
+* 最终值
+* 来源（`default` / `config.dat` / `CLI` / `suite`）
+* 当前场景是否生效
+* 影响说明
+* `config.dat` 中识别到的未知键
+
+当前重点覆盖的字段包括：
+
+* `RunSeconds`
+* `RequestsPerThread`
+* `AllowOpenEndedRun`
+* `Range`
+* `PartSize`
+* `PartsForEachUploadID`
+* `UploadFilePath`
+* `EnableCheckpoint`
+* `EnableDetailLog`
+* `GmAuthMode`
+* 证书路径
+* 对象大小
+* 总线程数
+
+同时，程序会在运行前结合当前 `TestCase` 输出“参数未生效/未使用”的提示。例如：
+
+* `download/get` 场景下，只有 `Range` 相关配置会参与 Range 请求；
+* `upload/put` 场景下，`Range` 不会生效；
+* `multipart` 场景下，`PartsForEachUploadID` / `PartSize` 生效；
+* `resumable` 场景下，`UploadFilePath` / `EnableCheckpoint` 生效；
+* `delete` 场景下，对象大小仅用于场景描述，不影响实际删除请求负载。
+
+### 4.0.1 常见参数影响关系
+
+| 场景 | 关键相关字段 | 常见无效字段 / 说明 |
+| --- | --- | --- |
+| `upload` | `Threads`、`ObjectSize`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `Range` 不生效；`PartsForEachUploadID` / `UploadFilePath` / `EnableCheckpoint` 默认不参与普通 PUT |
+| `download` | `Threads`、`ObjectSize`、`Range`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `PartSize`、`PartsForEachUploadID`、`UploadFilePath`、`EnableCheckpoint` 不生效 |
+| `delete` | `Threads`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `ObjectSize` 不影响删除请求本身；`Range`、`PartSize`、`PartsForEachUploadID`、`UploadFilePath`、`EnableCheckpoint` 不生效 |
+| `multipart` | `Threads`、`PartSize`、`PartsForEachUploadID`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `Range` 不生效；`UploadFilePath` / `EnableCheckpoint` 不参与普通 multipart API 流程 |
+| `resumable` | `Threads`、`PartSize`、`UploadFilePath`、`EnableCheckpoint`、`RunSeconds`、`RequestsPerThread`、`EnableDetailLog`、`GmAuthMode`、证书路径 | `Range` 不生效；`PartsForEachUploadID` 不参与断点续传上传 |
+| `mix` | 取决于 `MixOperation` 中实际包含的子操作；`effective_config.md` 会按最终场景判断字段是否生效 | 若 `mix` 中不包含 `get`，则 `Range` 不生效；若不包含 `multipart/resumable`，相关分段参数也不生效 |
+
 ### 4.1 Suite 模式
 
 当你需要在一次执行里连续跑多组小场景时，可以使用：
@@ -420,7 +468,7 @@ reporting:
 默认文件归属如下：
 
 * `reports/<scenario_label>/<timestamp>/archive.csv`: 任务级结构化归档文件，便于后续批量汇总与自动分析。
-* `reports/<scenario_label>/<timestamp>/brief.txt`: 全局配置与最终汇总报告。
+* `reports/<scenario_label>/<timestamp>/brief.txt`: 全局配置与最终汇总报告，同时会记录 `effective_config.md` 的路径。
 * `logs/<scenario_label>/<timestamp>/realtime.txt`: 每 3 秒一次的实时采样日志；若任务在 3 秒内结束，会补写最后一条样本。
 * `logs/<scenario_label>/<timestamp>/detail_X_partY.csv`: 高性能、多线程切割的请求级明细日志。
 
@@ -439,10 +487,27 @@ reporting:
 面向人工阅读，记录：
 
 * 本次任务的生效配置
+* `effective_config.md` 的落盘路径
 * 最终请求统计
 * CPU / RSS / TPS / BPS / 平均时延 / P99 / 单流带宽摘要
 
 `brief.txt` 是最终摘要报告，不是中间文件。
+
+#### `effective_config.md`
+
+面向“运行前解释”的 Markdown 说明文件，记录：
+
+* 最终 `TestCase`、执行模式、报告目录、日志目录
+* 重点字段的最终值与来源
+* 当前场景下该字段是否真正生效
+* 每个字段的影响说明
+* `config.dat` 中无法识别的键列表
+
+它适合在以下场景使用：
+
+* 排查 CLI / suite / `config.dat` 谁覆盖了谁
+* 确认 `Range`、`PartSize`、`UploadFilePath` 等参数在当前操作下是否真的参与执行
+* 在 CI 或批量压测中保存“运行前的最终决议配置”
 
 #### `realtime.txt`
 
