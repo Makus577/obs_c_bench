@@ -10,6 +10,7 @@ import re
 import platform
 import json
 import signal
+import csv
 
 # ================= 配置区域 =================
 CONFIG_FILE = 'config.dat'
@@ -139,6 +140,10 @@ class BenchmarkTester:
             extra_path = os.path.join(self.work_dir, extra_dir)
             if os.path.exists(extra_path):
                 shutil.rmtree(extra_path)
+        for extra_file in ['test_suite_resolved.tsv', 'test_suite_resolved.yaml']:
+            extra_path = os.path.join(self.work_dir, extra_file)
+            if os.path.exists(extra_path):
+                os.remove(extra_path)
         for extra_file in [
             SUITE_FILE,
             PROFILE_CONFIG_A,
@@ -522,6 +527,38 @@ reporting:
         with open(suite_path, "w", encoding="utf-8") as handle:
             handle.write(suite_yaml)
 
+        resolved_tsv = os.path.join(self.work_dir, "test_suite_resolved.tsv")
+        resolved_yaml = os.path.join(self.work_dir, "test_suite_resolved.yaml")
+        ret, output = self.run_cmd(
+            f"python3 scripts/suites/resolve_suite.py --suite {suite_path} "
+            f"--resolved-tsv {resolved_tsv} --resolved-yaml {resolved_yaml}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Suite resolver should succeed for suite smoke test.")
+            return False
+        resolved_tsv_text = open(resolved_tsv, "r", encoding="utf-8").read()
+        resolved_yaml_text = open(resolved_yaml, "r", encoding="utf-8").read()
+        with open(resolved_tsv, "r", encoding="utf-8", newline="") as handle:
+            resolved_rows = list(csv.DictReader(handle, delimiter="\t"))
+        resolved_custom = next((row for row in resolved_rows if row.get("scenario_id") == "suite_download_custom"), None)
+        if not resolved_custom:
+            print(resolved_tsv_text)
+            print("[FAIL] Resolved TSV missing suite_download_custom row.")
+            return False
+        if resolved_custom.get("run_seconds") != "2" or resolved_custom.get("requests_per_thread") != "2":
+            print(resolved_custom)
+            print("[FAIL] Resolved TSV missing expected runtime values for custom scenario.")
+            return False
+        if resolved_custom.get("analyze_longrun") != "1" or resolved_custom.get("gate_longrun") != "0":
+            print(resolved_custom)
+            print("[FAIL] Resolved TSV missing expected longrun flags for custom scenario.")
+            return False
+        if "scenario_id: suite_download_custom" not in resolved_yaml_text or "run_seconds: 2" not in resolved_yaml_text:
+            print(resolved_yaml_text)
+            print("[FAIL] Resolved YAML missing expected scenario runtime values.")
+            return False
+
         ret, output = self.run_cmd(
             f"{bin_path} --suite {suite_path} --output-dir {suite_report_root} --log-dir {suite_log_root}"
         )
@@ -580,6 +617,24 @@ reporting:
         if "/s" not in suite_md:
             print("[FAIL] suite_summary.md missing human-readable throughput units.")
             return False
+        with open(os.path.join(summary_dir, "suite_summary.json"), "r", encoding="utf-8") as handle:
+            suite_json = json.load(handle)
+        custom_row = next((row for row in suite_json if row.get("scenario_id") == "suite_download_custom"), None)
+        if not custom_row:
+            print("[FAIL] suite_summary.json missing suite_download_custom row.")
+            return False
+        if str(custom_row.get("run_seconds", "")).strip() != "2":
+            print(custom_row)
+            print("[FAIL] suite_summary.json missing expected run_seconds value.")
+            return False
+        if str(custom_row.get("analyze_longrun", "")).strip() not in ("1", "true", "True"):
+            print(custom_row)
+            print("[FAIL] suite_summary.json missing analyze_longrun marker.")
+            return False
+        if custom_row.get("final_status") not in ("PASS", "WARN"):
+            print(custom_row)
+            print("[FAIL] suite_summary.json missing expected final_status.")
+            return False
         if "Effective RunSeconds: 2" not in output or "LongrunEnabled: true" not in output:
             print("[FAIL] Suite console output missing effective longrun diagnostics.")
             return False
@@ -602,6 +657,9 @@ reporting:
             longrun_data = json.load(handle)
         if longrun_data.get("longrun_status") not in ("PASS", "WARN", "FAIL", "INSUFFICIENT_DATA"):
             print("[FAIL] longrun_summary.json missing longrun_status.")
+            return False
+        if "sample_count" not in longrun_data:
+            print("[FAIL] longrun_summary.json missing sample_count.")
             return False
         if "single_core_cpu_start_pct" not in longrun_data:
             print("[FAIL] longrun_summary.json missing single-core CPU trend fields.")
@@ -1087,15 +1145,19 @@ reporting:
 
         users_path = os.path.join(inputs_dir, "users.dat")
         payload_path = os.path.join(inputs_dir, "payload.bin")
+        server_cert_path = os.path.join(inputs_dir, "server.pem")
         base_profile = os.path.join(profiles_dir, "base_profile.dat")
         simple_only_yaml = os.path.join(test_root, "simple_only.yaml")
         simple_profile_yaml = os.path.join(test_root, "simple_with_profile.yaml")
         invalid_field_yaml = os.path.join(test_root, "invalid_field.yaml")
         invalid_profile_order_yaml = os.path.join(test_root, "invalid_profile_order.yaml")
         invalid_nested_yaml = os.path.join(test_root, "invalid_nested.yaml")
+        invalid_duplicate_profile_yaml = os.path.join(test_root, "invalid_duplicate_profile.yaml")
 
         shutil.copy(USERS_FILE, users_path)
         shutil.copy(TEST_DATA_FILE, payload_path)
+        with open(server_cert_path, "w", encoding="utf-8") as handle:
+            handle.write("dummy-cert\n")
         shutil.copy(CONFIG_FILE, base_profile)
 
         with open(base_profile, "a", encoding="utf-8") as handle:
@@ -1110,9 +1172,12 @@ object_size: 2MB
 run_seconds: 2
 requests_per_thread: 0
 enable_detail_log: true
+allow_open_ended_run: false
 advanced:
   upload_file_path: ./inputs/payload.bin
   enable_checkpoint: false
+security:
+  server_cert_path: ./inputs/server.pem
 """
         simple_profile_text = """profile: ./profiles/base_profile.dat
 users_file: ./inputs/users.dat
@@ -1142,6 +1207,13 @@ object_size: 1MB
 misc:
   foo: bar
 """
+        invalid_duplicate_profile_text = """profile: ./profiles/base_profile.dat
+profile: ./profiles/base_profile.dat
+op: upload
+threads: 1
+object_size: 1MB
+users_file: ./inputs/users.dat
+"""
 
         for path, content in [
             (simple_only_yaml, simple_only_text),
@@ -1149,6 +1221,7 @@ misc:
             (invalid_field_yaml, invalid_field_text),
             (invalid_profile_order_yaml, invalid_profile_order_text),
             (invalid_nested_yaml, invalid_nested_text),
+            (invalid_duplicate_profile_yaml, invalid_duplicate_profile_text),
         ]:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(content)
@@ -1183,8 +1256,15 @@ misc:
         effective_text = open(effective_config_path, "r", encoding="utf-8").read()
         brief_text = open(brief_path, "r", encoding="utf-8").read()
         payload_abs = os.path.abspath(payload_path)
+        server_cert_abs = os.path.abspath(server_cert_path)
         if "| `RunSeconds` | `2` | `config.dat` | `yes` |" not in effective_text:
             print("[FAIL] effective_config.md missing RunSeconds source tracking for simple YAML.")
+            return False
+        if "| `RequestsPerThread` | `0` | `config.dat` | `yes` |" not in effective_text:
+            print("[FAIL] effective_config.md missing RequestsPerThread source tracking for simple YAML.")
+            return False
+        if "| `AllowOpenEndedRun` | `false` | `config.dat` | `yes` |" not in effective_text:
+            print("[FAIL] effective_config.md missing AllowOpenEndedRun source tracking for simple YAML.")
             return False
         if "| `Threads` | `3` | `config.dat` | `yes` |" not in effective_text:
             print("[FAIL] effective_config.md missing Threads source tracking for simple YAML.")
@@ -1194,6 +1274,9 @@ misc:
             return False
         if f"| `UploadFilePath` | `{payload_abs}` | `config.dat` | `no` |" not in effective_text:
             print("[FAIL] effective_config.md missing resolved UploadFilePath or inactive-state marker for simple YAML.")
+            return False
+        if f"| `ServerCertPath` | `{server_cert_abs}` | `config.dat` | `yes` |" not in effective_text:
+            print("[FAIL] effective_config.md missing resolved ServerCertPath or source tracking for simple YAML.")
             return False
         if "EffectiveConfig:" not in brief_text or "effective_config.md" not in brief_text:
             print("[FAIL] brief.txt missing effective config reference for simple YAML.")
@@ -1234,6 +1317,7 @@ misc:
             (invalid_field_yaml, "Unsupported simple config field"),
             (invalid_profile_order_yaml, "profile must be declared before"),
             (invalid_nested_yaml, "Unsupported section"),
+            (invalid_duplicate_profile_yaml, "Only one profile is supported"),
         ]:
             ret, output = self.run_cmd(f"{bin_path} --config {invalid_path}")
             if ret == 0 or expected_msg not in output:
