@@ -1018,6 +1018,7 @@ static void build_single_run_label(const CliOptions *cli, char *label, size_t la
 
     apply_cli_overrides(&cfg, cli);
     if (cli->threads_set) derived_threads = cli->threads;
+    else if (cfg.threads > 0) derived_threads = cfg.threads;
     else if (cfg.target_user_count > 0 && cfg.threads_per_user > 0) derived_threads = cfg.target_user_count * cfg.threads_per_user;
     else derived_threads = 0;
 

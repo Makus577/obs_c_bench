@@ -135,7 +135,7 @@ class BenchmarkTester:
             shutil.move(USERS_BAK, USERS_FILE)
         elif self.created_users and os.path.exists(USERS_FILE):
             os.remove(USERS_FILE)
-        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out', 'test_suite_reports', 'test_suite_logs', 'test_auto_baseline', 'test_longrun_runtime']:
+        for extra_dir in ['test_reports_out', 'test_logs_out', 'test_perf_gate_out', 'test_suite_reports', 'test_suite_logs', 'test_auto_baseline', 'test_longrun_runtime', 'test_simple_config']:
             extra_path = os.path.join(self.work_dir, extra_dir)
             if os.path.exists(extra_path):
                 shutil.rmtree(extra_path)
@@ -264,7 +264,7 @@ class BenchmarkTester:
 
     def stage_cli_archive_test(self):
         print("\n" + "=" * 60)
-        print(">>> Stage 3: Output Dir Split & CLI Verification")
+        print(">>> Stage 4: Output Dir Split & CLI Verification")
         print("=" * 60)
 
         bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
@@ -372,7 +372,7 @@ class BenchmarkTester:
 
     def stage_perf_gate_test(self):
         print("\n" + "=" * 60)
-        print(">>> Stage 4: Perf Baseline Comparison & Gate Verification")
+        print(">>> Stage 5: Perf Baseline Comparison & Gate Verification")
         print("=" * 60)
 
         perf_root = os.path.join(self.work_dir, "test_perf_gate_out")
@@ -475,7 +475,7 @@ class BenchmarkTester:
 
     def stage_suite_test(self):
         print("\n" + "=" * 60)
-        print(">>> Stage 5: Suite Mode & Long-Run Artifact Verification")
+        print(">>> Stage 6: Suite Mode & Long-Run Artifact Verification")
         print("=" * 60)
 
         bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
@@ -616,7 +616,7 @@ reporting:
 
     def stage_suite_baseline_automation_test(self):
         print("\n" + "=" * 60)
-        print(">>> Stage 6: Auto Baseline Generate & Compare Verification")
+        print(">>> Stage 7: Auto Baseline Generate & Compare Verification")
         print("=" * 60)
 
         bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
@@ -827,7 +827,7 @@ gates:
 
     def stage_runtime_validation_test(self):
         print("\n" + "=" * 60)
-        print(">>> Stage 7: Runtime Validation & Open-Ended Protection")
+        print(">>> Stage 8: Runtime Validation & Open-Ended Protection")
         print("=" * 60)
 
         bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
@@ -902,7 +902,7 @@ UploadFilePath={TEST_DATA_FILE}
 
     def stage_longrun_run_seconds_test(self):
         print("\n" + "=" * 60)
-        print(">>> Stage 8: Long-Run RunSeconds Resolution Verification")
+        print(">>> Stage 9: Long-Run RunSeconds Resolution Verification")
         print("=" * 60)
 
         bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
@@ -1071,6 +1071,179 @@ reporting:
         print("[PASS] Long-run run_seconds resolution verification succeeded.")
         return True
 
+    def stage_simple_config_test(self):
+        print("\n" + "=" * 60)
+        print(">>> Stage 3: Simplified Config & Effective Config Verification")
+        print("=" * 60)
+
+        bin_path = os.path.join(CACHE_DIR, "obs_c_bench_mock")
+        test_root = os.path.join(self.work_dir, "test_simple_config")
+        reports_root = os.path.join(test_root, "reports")
+        logs_root = os.path.join(test_root, "logs")
+        inputs_dir = os.path.join(test_root, "inputs")
+        profiles_dir = os.path.join(test_root, "profiles")
+        os.makedirs(inputs_dir, exist_ok=True)
+        os.makedirs(profiles_dir, exist_ok=True)
+
+        users_path = os.path.join(inputs_dir, "users.dat")
+        payload_path = os.path.join(inputs_dir, "payload.bin")
+        base_profile = os.path.join(profiles_dir, "base_profile.dat")
+        simple_only_yaml = os.path.join(test_root, "simple_only.yaml")
+        simple_profile_yaml = os.path.join(test_root, "simple_with_profile.yaml")
+        invalid_field_yaml = os.path.join(test_root, "invalid_field.yaml")
+        invalid_profile_order_yaml = os.path.join(test_root, "invalid_profile_order.yaml")
+        invalid_nested_yaml = os.path.join(test_root, "invalid_nested.yaml")
+
+        shutil.copy(USERS_FILE, users_path)
+        shutil.copy(TEST_DATA_FILE, payload_path)
+        shutil.copy(CONFIG_FILE, base_profile)
+
+        with open(base_profile, "a", encoding="utf-8") as handle:
+            handle.write("RequestsPerThread=6\n")
+            handle.write("PartSize=7000000\n")
+            handle.write("EnableCheckpoint=true\n")
+
+        simple_only_text = """users_file: ./inputs/users.dat
+op: upload
+threads: 3
+object_size: 2MB
+run_seconds: 2
+requests_per_thread: 0
+enable_detail_log: true
+advanced:
+  upload_file_path: ./inputs/payload.bin
+  enable_checkpoint: false
+"""
+        simple_profile_text = """profile: ./profiles/base_profile.dat
+users_file: ./inputs/users.dat
+op: download
+threads: 2
+object_size: 512KB
+run_seconds: 3
+advanced:
+  range: 0-1023
+"""
+        invalid_field_text = """users_file: ./inputs/users.dat
+op: upload
+threads: 1
+object_size: 1MB
+unexpected_field: boom
+"""
+        invalid_profile_order_text = """op: upload
+profile: ./profiles/base_profile.dat
+threads: 1
+object_size: 1MB
+users_file: ./inputs/users.dat
+"""
+        invalid_nested_text = """users_file: ./inputs/users.dat
+op: upload
+threads: 1
+object_size: 1MB
+misc:
+  foo: bar
+"""
+
+        for path, content in [
+            (simple_only_yaml, simple_only_text),
+            (simple_profile_yaml, simple_profile_text),
+            (invalid_field_yaml, invalid_field_text),
+            (invalid_profile_order_yaml, invalid_profile_order_text),
+            (invalid_nested_yaml, invalid_nested_text),
+        ]:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --config {simple_only_yaml} --output-dir {reports_root} --log-dir {logs_root}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Simple YAML without profile should run successfully.")
+            return False
+
+        simple_only_label = os.path.join(reports_root, "upload_2mb_3t")
+        simple_only_log_label = os.path.join(logs_root, "upload_2mb_3t")
+        if not os.path.isdir(simple_only_label) or not os.path.isdir(simple_only_log_label):
+            print("[FAIL] Auto-generated scenario label directory missing for simple YAML run.")
+            return False
+        run_dirs = sorted(os.listdir(simple_only_label))
+        if not run_dirs:
+            print("[FAIL] Missing timestamped output directory for simple YAML run.")
+            return False
+        report_dir = os.path.join(simple_only_label, run_dirs[-1])
+        log_dir = os.path.join(simple_only_log_label, run_dirs[-1])
+        effective_config_path = os.path.join(report_dir, "effective_config.md")
+        brief_path = os.path.join(report_dir, "brief.txt")
+        if not os.path.exists(effective_config_path) or not os.path.exists(brief_path):
+            print("[FAIL] Missing effective_config.md or brief.txt for simple YAML run.")
+            return False
+        if not any(name.startswith("detail_") for name in os.listdir(log_dir)):
+            print("[FAIL] Simple YAML run with enable_detail_log should generate detail logs.")
+            return False
+        effective_text = open(effective_config_path, "r", encoding="utf-8").read()
+        brief_text = open(brief_path, "r", encoding="utf-8").read()
+        payload_abs = os.path.abspath(payload_path)
+        if "| `RunSeconds` | `2` | `config.dat` | `yes` |" not in effective_text:
+            print("[FAIL] effective_config.md missing RunSeconds source tracking for simple YAML.")
+            return False
+        if "| `Threads` | `3` | `config.dat` | `yes` |" not in effective_text:
+            print("[FAIL] effective_config.md missing Threads source tracking for simple YAML.")
+            return False
+        if "| `ObjectSize` | `2MB (2000000 Bytes)` | `config.dat` | `yes` |" not in effective_text:
+            print("[FAIL] effective_config.md missing ObjectSize source/value for simple YAML.")
+            return False
+        if f"| `UploadFilePath` | `{payload_abs}` | `config.dat` | `no` |" not in effective_text:
+            print("[FAIL] effective_config.md missing resolved UploadFilePath or inactive-state marker for simple YAML.")
+            return False
+        if "EffectiveConfig:" not in brief_text or "effective_config.md" not in brief_text:
+            print("[FAIL] brief.txt missing effective config reference for simple YAML.")
+            return False
+
+        ret, output = self.run_cmd(
+            f"{bin_path} --config {simple_profile_yaml} --output-dir {reports_root} --log-dir {logs_root}"
+        )
+        if ret != 0:
+            print(output)
+            print("[FAIL] Simple YAML with profile inheritance should run successfully.")
+            return False
+
+        inherited_label = os.path.join(reports_root, "download_512kb_2t")
+        if not os.path.isdir(inherited_label):
+            print("[FAIL] Missing auto-generated label for profile-backed simple YAML run.")
+            return False
+        inherited_runs = sorted(os.listdir(inherited_label))
+        inherited_report_dir = os.path.join(inherited_label, inherited_runs[-1])
+        inherited_effective = open(os.path.join(inherited_report_dir, "effective_config.md"), "r", encoding="utf-8").read()
+        if "| `RunSeconds` | `3` | `config.dat` | `yes` |" not in inherited_effective:
+            print("[FAIL] Profile-backed simple YAML did not override RunSeconds as expected.")
+            return False
+        if "| `RequestsPerThread` | `6` | `config.dat` | `yes` |" not in inherited_effective:
+            print("[FAIL] Profile-backed simple YAML did not inherit RequestsPerThread from profile.")
+            return False
+        if "| `Range` | `0-1023` | `config.dat` | `yes` |" not in inherited_effective:
+            print("[FAIL] Profile-backed simple YAML did not apply Range override.")
+            return False
+        if "| `PartSize` | `7000000 Bytes` | `config.dat` | `no` |" not in inherited_effective:
+            print("[FAIL] effective_config.md did not mark inherited PartSize as inactive for download scenario.")
+            return False
+        if "[Config Warning] PartSize=7000000 is ignored for this download scenario." not in output:
+            print("[FAIL] Expected inactive field warning missing for profile-backed simple YAML.")
+            return False
+
+        for invalid_path, expected_msg in [
+            (invalid_field_yaml, "Unsupported simple config field"),
+            (invalid_profile_order_yaml, "profile must be declared before"),
+            (invalid_nested_yaml, "Unsupported section"),
+        ]:
+            ret, output = self.run_cmd(f"{bin_path} --config {invalid_path}")
+            if ret == 0 or expected_msg not in output:
+                print(output)
+                print(f"[FAIL] Invalid simple YAML should fail with message containing: {expected_msg}")
+                return False
+
+        print("[PASS] Simplified config and effective config verification succeeded.")
+        return True
+
     def print_summary(self):
         print("\n" + "=" * 60)
         print(f"{'BUILD':<12} | {'CASE':<6} | {'STATUS':<10} | {'DETAIL'}")
@@ -1108,6 +1281,8 @@ reporting:
                 print(">>> ABORTING: Compilation failed.")
                 sys.exit(1)
             self.stage_smoke_test()
+            if not self.stage_simple_config_test():
+                sys.exit(1)
             if not self.stage_cli_archive_test():
                 sys.exit(1)
             if not self.stage_perf_gate_test():

@@ -161,26 +161,34 @@ static char *unquote_value(char *val) {
 static void resolve_path_relative_to_file(const char *base_file, const char *value, char *out, size_t out_size) {
     const char *slash;
     size_t dir_len;
+    char joined[PATH_MAX];
+    char resolved[PATH_MAX];
 
     if (!out || out_size == 0) return;
     out[0] = '\0';
     if (!value || value[0] == '\0') return;
     if (value[0] == '/' || !base_file || base_file[0] == '\0') {
-        snprintf(out, out_size, "%s", value);
+        if (realpath(value, resolved)) snprintf(out, out_size, "%s", resolved);
+        else snprintf(out, out_size, "%s", value);
         return;
     }
 
     slash = strrchr(base_file, '/');
     if (!slash) {
-        snprintf(out, out_size, "%s", value);
+        if (realpath(value, resolved)) snprintf(out, out_size, "%s", resolved);
+        else snprintf(out, out_size, "%s", value);
         return;
     }
     dir_len = (size_t)(slash - base_file);
     if (dir_len == 0) {
-        snprintf(out, out_size, "/%s", value);
+        snprintf(joined, sizeof(joined), "/%s", value);
+        if (realpath(joined, resolved)) snprintf(out, out_size, "%s", resolved);
+        else snprintf(out, out_size, "%s", joined);
         return;
     }
-    snprintf(out, out_size, "%.*s/%s", (int)dir_len, base_file, value);
+    snprintf(joined, sizeof(joined), "%.*s/%s", (int)dir_len, base_file, value);
+    if (realpath(joined, resolved)) snprintf(out, out_size, "%s", resolved);
+    else snprintf(out, out_size, "%s", joined);
 }
 
 int parse_object_size_spec(const char *spec, Config *cfg, char *errbuf, size_t errbuf_size) {
@@ -417,106 +425,6 @@ static int finalize_config(Config *cfg, const char *source_name, int allow_defau
 
     if (cfg->part_size <= 0) cfg->part_size = 5 * 1024 * 1024;
     if (cfg->target_user_count <= 0 && allow_default_user_count) cfg->target_user_count = 1;
-        char *eq = strchr(clean_line, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        
-        char *key = trim_both(clean_line);
-        char *val = trim_both(eq + 1);
-
-        if (strcmp(key, "Endpoint") == 0) strcpy(cfg->endpoint, val);
-        else if (strcmp(key, "Protocol") == 0) strcpy(cfg->protocol, val);
-        else if (strcmp(key, "KeepAlive") == 0) cfg->keep_alive = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        // [新增校验]: 对连接超时的配置值进行合法性检查
-        else if (strcmp(key, "ConnectTimeoutSec") == 0) {
-            if (strlen(val) > 0) {
-                cfg->connect_timeout_sec = atoi(val);
-                if (cfg->connect_timeout_sec <= 0) {
-                    printf("[Config Error] 'ConnectTimeoutSec' must be > 0. Invalid value: %s\n", val);
-                    fclose(fp); return -1;
-                }
-            }
-        }
-        else if (strcmp(key, "RequestTimeoutSec") == 0) {
-            if (strlen(val) > 0) {
-                cfg->request_timeout_sec = atoi(val);
-                if (cfg->request_timeout_sec <= 0) {
-                    printf("[Config Error] 'RequestTimeoutSec' must be > 0. Invalid value: %s\n", val);
-                    fclose(fp); return -1;
-                }
-            }
-        }
-        else if (strcmp(key, "LogLevel") == 0) cfg->log_level = log_level_from_string(val);
-        else if (strcmp(key, "ObjNamePatternHash") == 0) cfg->obj_name_pattern_hash = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        else if (strcmp(key, "EnableCheckpoint") == 0) { cfg->enable_checkpoint = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0); cfg->enable_checkpoint_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "UploadFilePath") == 0) { strcpy(cfg->upload_file_path, val); cfg->upload_file_path_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "BucketNamePrefix") == 0) strcpy(cfg->bucket_name_prefix, val);
-        else if (strcmp(key, "BucketNameFixed") == 0) strcpy(cfg->bucket_name_fixed, val);
-        else if (strcmp(key, "IsTemporaryToken") == 0) cfg->is_temporary_token = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        else if (strcmp(key, "Users") == 0) cfg->target_user_count = atoi(val);
-        else if (strcmp(key, "ThreadsPerUser") == 0) cfg->threads_per_user = atoi(val);
-        else if (strcmp(key, "RequestsPerThread") == 0) { cfg->requests_per_thread = atoi(val); cfg->requests_per_thread_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "TestCase") == 0) cfg->test_case = atoi(val);
-        
-        else if (strcmp(key, "ObjectSize") == 0) {
-            cfg->object_size_source = CONFIG_SOURCE_CONFIG;
-            char errbuf[128] = {0};
-            if (parse_object_size_spec(val, cfg, errbuf, sizeof(errbuf)) != 0) {
-                printf("[Config Error] %s\n", errbuf);
-                fclose(fp); return -1;
-            }
-        }
-        else if (strcmp(key, "Range") == 0) {
-            cfg->range_source = CONFIG_SOURCE_CONFIG;
-            char *temp = strdup(val);
-            if (temp) {
-                char *token = strtok(temp, ";");
-                int idx = 0;
-                while (token != NULL && idx < MAX_RANGE_OPTIONS) {
-                    char *clean_token = trim_both(token);
-                    if (strlen(clean_token) > 0) {
-                        cfg->range_options[idx] = strdup(clean_token);
-                        idx++;
-                    }
-                    token = strtok(NULL, ";");
-                }
-                cfg->range_count = idx;
-                free(temp);
-            }
-        }
-        else if (strcmp(key, "PartSize") == 0) { cfg->part_size = atoll(val); cfg->part_size_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "PartsForEachUploadID") == 0) {
-            cfg->parts_for_each_upload_id = atoi(val);
-            cfg->parts_for_each_upload_id_source = CONFIG_SOURCE_CONFIG;
-            if (cfg->parts_for_each_upload_id < 0) {
-                cfg->parts_for_each_upload_id = 0; 
-            } else if (cfg->parts_for_each_upload_id > 10000) {
-                printf("[WARN] PartsForEachUploadID (%d) exceeds OBS max limit. Capped to 10000.\n", cfg->parts_for_each_upload_id);
-                cfg->parts_for_each_upload_id = 10000;
-            }
-        }
-        else if (strcmp(key, "KeyPrefix") == 0) strcpy(cfg->key_prefix, val);
-        else if (strcmp(key, "MixOperation") == 0) cfg->mix_op_count = parse_mix_ops(val, cfg->mix_ops, MAX_MIX_OPS);
-        else if (strcmp(key, "MixLoopCount") == 0) cfg->mix_loop_count = atoll(val);
-        else if (strcmp(key, "RunSeconds") == 0) { cfg->run_seconds = atoi(val); cfg->run_seconds_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "AllowOpenEndedRun") == 0) { cfg->allow_open_ended_run = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0); cfg->allow_open_ended_run_source = CONFIG_SOURCE_CONFIG; }
-        
-        // ------------------
-        // 安全配置映射
-        // ------------------
-        else if (strcmp(key, "GmAuthMode") == 0) { strcpy(cfg->gm_auth_mode, val); cfg->gm_auth_mode_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ServerCertPath") == 0) { strcpy(cfg->server_cert_path, val); cfg->server_cert_path_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ClientSignCertPath") == 0) { strcpy(cfg->client_sign_cert_path, val); cfg->client_sign_cert_path_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ClientSignKeyPath") == 0) { strcpy(cfg->client_sign_key_path, val); cfg->client_sign_key_path_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ClientSignKeyPassword") == 0) { strcpy(cfg->client_sign_key_password, val); cfg->client_sign_key_password_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ClientEncCertPath") == 0) { strcpy(cfg->client_enc_cert_path, val); cfg->client_enc_cert_path_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ClientEncKeyPath") == 0) { strcpy(cfg->client_enc_key_path, val); cfg->client_enc_key_path_source = CONFIG_SOURCE_CONFIG; }
-
-        else if (strcmp(key, "EnableDataValidation") == 0) cfg->enable_data_validation = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
-        else if (strcmp(key, "EnableDetailLog") == 0) { cfg->enable_detail_log = (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0); cfg->enable_detail_log_source = CONFIG_SOURCE_CONFIG; }
-        else if (strcmp(key, "ResumableTaskNum") == 0) cfg->resumable_task_num = atoi(val);
-        else remember_unknown_config_key(cfg, key);
-    }
     
     if (cfg->part_size <= 0) cfg->part_size = 5 * 1024 * 1024; 
     if (cfg->target_user_count <= 0) {
@@ -591,15 +499,27 @@ static int apply_config_entry(Config *cfg, const char *key, const char *val, con
     }
     else if (strcmp(key, "LogLevel") == 0) cfg->log_level = log_level_from_string(val);
     else if (strcmp(key, "ObjNamePatternHash") == 0) cfg->obj_name_pattern_hash = parse_bool_text(val);
-    else if (strcmp(key, "EnableCheckpoint") == 0) cfg->enable_checkpoint = parse_bool_text(val);
-    else if (strcmp(key, "UploadFilePath") == 0) strcpy(cfg->upload_file_path, val);
+    else if (strcmp(key, "EnableCheckpoint") == 0) {
+        cfg->enable_checkpoint = parse_bool_text(val);
+        cfg->enable_checkpoint_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "UploadFilePath") == 0) {
+        strcpy(cfg->upload_file_path, val);
+        cfg->upload_file_path_source = CONFIG_SOURCE_CONFIG;
+    }
     else if (strcmp(key, "BucketNamePrefix") == 0) strcpy(cfg->bucket_name_prefix, val);
     else if (strcmp(key, "BucketNameFixed") == 0) strcpy(cfg->bucket_name_fixed, val);
     else if (strcmp(key, "IsTemporaryToken") == 0) cfg->is_temporary_token = parse_bool_text(val);
     else if (strcmp(key, "Users") == 0) cfg->target_user_count = atoi(val);
     else if (strcmp(key, "ThreadsPerUser") == 0) cfg->threads_per_user = atoi(val);
-    else if (strcmp(key, "Threads") == 0) cfg->threads = atoi(val);
-    else if (strcmp(key, "RequestsPerThread") == 0) cfg->requests_per_thread = atoi(val);
+    else if (strcmp(key, "Threads") == 0) {
+        cfg->threads = atoi(val);
+        cfg->threads_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "RequestsPerThread") == 0) {
+        cfg->requests_per_thread = atoi(val);
+        cfg->requests_per_thread_source = CONFIG_SOURCE_CONFIG;
+    }
     else if (strcmp(key, "TestCase") == 0) {
         if (is_simple_yaml) {
             if (parse_test_case_arg(val, &cfg->test_case) != 0) {
@@ -616,6 +536,7 @@ static int apply_config_entry(Config *cfg, const char *key, const char *val, con
             printf("[Config Error] %s\n", errbuf);
             return -1;
         }
+        cfg->object_size_source = CONFIG_SOURCE_CONFIG;
     }
     else if (strcmp(key, "Range") == 0) {
         char *temp;
@@ -635,10 +556,15 @@ static int apply_config_entry(Config *cfg, const char *key, const char *val, con
             cfg->range_count = idx;
             free(temp);
         }
+        cfg->range_source = CONFIG_SOURCE_CONFIG;
     }
-    else if (strcmp(key, "PartSize") == 0) cfg->part_size = atoll(val);
+    else if (strcmp(key, "PartSize") == 0) {
+        cfg->part_size = atoll(val);
+        cfg->part_size_source = CONFIG_SOURCE_CONFIG;
+    }
     else if (strcmp(key, "PartsForEachUploadID") == 0) {
         cfg->parts_for_each_upload_id = atoi(val);
+        cfg->parts_for_each_upload_id_source = CONFIG_SOURCE_CONFIG;
         if (cfg->parts_for_each_upload_id < 0) {
             cfg->parts_for_each_upload_id = 0;
         } else if (cfg->parts_for_each_upload_id > 10000) {
@@ -649,17 +575,47 @@ static int apply_config_entry(Config *cfg, const char *key, const char *val, con
     else if (strcmp(key, "KeyPrefix") == 0) strcpy(cfg->key_prefix, val);
     else if (strcmp(key, "MixOperation") == 0) cfg->mix_op_count = parse_mix_ops(val, cfg->mix_ops, MAX_MIX_OPS);
     else if (strcmp(key, "MixLoopCount") == 0) cfg->mix_loop_count = atoll(val);
-    else if (strcmp(key, "RunSeconds") == 0) cfg->run_seconds = atoi(val);
-    else if (strcmp(key, "AllowOpenEndedRun") == 0) cfg->allow_open_ended_run = parse_bool_text(val);
-    else if (strcmp(key, "GmAuthMode") == 0) strcpy(cfg->gm_auth_mode, val);
-    else if (strcmp(key, "ServerCertPath") == 0) strcpy(cfg->server_cert_path, val);
-    else if (strcmp(key, "ClientSignCertPath") == 0) strcpy(cfg->client_sign_cert_path, val);
-    else if (strcmp(key, "ClientSignKeyPath") == 0) strcpy(cfg->client_sign_key_path, val);
-    else if (strcmp(key, "ClientSignKeyPassword") == 0) strcpy(cfg->client_sign_key_password, val);
-    else if (strcmp(key, "ClientEncCertPath") == 0) strcpy(cfg->client_enc_cert_path, val);
-    else if (strcmp(key, "ClientEncKeyPath") == 0) strcpy(cfg->client_enc_key_path, val);
+    else if (strcmp(key, "RunSeconds") == 0) {
+        cfg->run_seconds = atoi(val);
+        cfg->run_seconds_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "AllowOpenEndedRun") == 0) {
+        cfg->allow_open_ended_run = parse_bool_text(val);
+        cfg->allow_open_ended_run_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "GmAuthMode") == 0) {
+        strcpy(cfg->gm_auth_mode, val);
+        cfg->gm_auth_mode_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "ServerCertPath") == 0) {
+        strcpy(cfg->server_cert_path, val);
+        cfg->server_cert_path_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "ClientSignCertPath") == 0) {
+        strcpy(cfg->client_sign_cert_path, val);
+        cfg->client_sign_cert_path_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "ClientSignKeyPath") == 0) {
+        strcpy(cfg->client_sign_key_path, val);
+        cfg->client_sign_key_path_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "ClientSignKeyPassword") == 0) {
+        strcpy(cfg->client_sign_key_password, val);
+        cfg->client_sign_key_password_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "ClientEncCertPath") == 0) {
+        strcpy(cfg->client_enc_cert_path, val);
+        cfg->client_enc_cert_path_source = CONFIG_SOURCE_CONFIG;
+    }
+    else if (strcmp(key, "ClientEncKeyPath") == 0) {
+        strcpy(cfg->client_enc_key_path, val);
+        cfg->client_enc_key_path_source = CONFIG_SOURCE_CONFIG;
+    }
     else if (strcmp(key, "EnableDataValidation") == 0) cfg->enable_data_validation = parse_bool_text(val);
-    else if (strcmp(key, "EnableDetailLog") == 0) cfg->enable_detail_log = parse_bool_text(val);
+    else if (strcmp(key, "EnableDetailLog") == 0) {
+        cfg->enable_detail_log = parse_bool_text(val);
+        cfg->enable_detail_log_source = CONFIG_SOURCE_CONFIG;
+    }
     else if (strcmp(key, "ResumableTaskNum") == 0) cfg->resumable_task_num = atoi(val);
     else if (strcmp(key, "AnalyzeLongrun") == 0) cfg->analyze_longrun = parse_bool_text(val);
     else if (strcmp(key, "GateLongrun") == 0) cfg->gate_longrun = parse_bool_text(val);
