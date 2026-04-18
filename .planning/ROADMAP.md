@@ -45,7 +45,10 @@
 3. User can inspect `./reports/<run_id>/` containing {benchmark, analysis, gate, dashboard}/ subdirectories with all intermediate outputs
 4. User can skip the plotting step with `--skip-plot` to save time when debugging gate failures
 
-**Plans:** TBD
+**Plans:** 1/1 plans complete
+
+**Plan list:**
+- [x] 02-01-PLAN.md — Orchestration CLI (`run` subcommand) chaining benchmark -> merge_details -> analyze_longrun -> perf_gate -> plot_report with fail-fast error handling and structured output dirs
 
 ---
 
@@ -67,13 +70,12 @@
 **Plans:** TBD
 
 ---
-
 ## Progress Table
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Configuration Simplification | 1/1 | Complete    | 2026-04-18 |
-| 2. One-Click Workflow | 0/4 | Not started | - |
+| 2. One-Click Workflow | 1/1 | Not started | - |
 | 3. Long-Run Enhancement + CI Gates | 0/4 | Not started | - |
 
 ---
