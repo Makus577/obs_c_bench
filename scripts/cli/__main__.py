@@ -18,6 +18,63 @@ def cli():
 
 
 @cli.command()
+@click.option('--config', 'config_path', type=click.Path(exists=True),
+              help='Path to scenario YAML (mutually exclusive with --suite)')
+@click.option('--suite', 'suite_path', type=click.Path(exists=True),
+              help='Path to suite YAML (mutually exclusive with --config)')
+@click.option('--output-dir', 'output_dir', type=click.Path(),
+              default='./reports', help='Output directory for all reports')
+@click.option('--run-id', 'run_id', type=str, default=None,
+              help='Custom run identifier (default: auto-generated from scenario/suite + timestamp)')
+@click.option('--skip-plot', is_flag=True,
+              help='Skip the dashboard plotting step (useful when debugging gate failures)')
+@click.option('--dry-run', is_flag=True,
+              help='Validate configuration without executing the benchmark')
+@click.option('--benchmark-binary', 'benchmark_binary', type=click.Path(exists=True),
+              default=None, help='Path to obs_c_bench binary (default: auto-detect)')
+def run(config_path, suite_path, output_dir, run_id, skip_plot, dry_run, benchmark_binary):
+    """Execute the full benchmarking pipeline with a command.
+
+    Chains: benchmark -> merge_details -> analyze_longrun -> perf_gate -> plot_report
+
+    Examples:
+
+      python -m obs_bench.cli run --config scenario.yaml --output-dir ./reports
+
+      python -m obs_bench.cli run --suite suite.yaml --output-dir ./reports
+
+      python -m obs_bench.cli run --config scenario.yaml --skip-plot --output-dir ./reports
+
+      python -m obs_bench.cli run --config scenario.yaml --dry-run
+    """
+    from scripts.orchestration.run_benchmark import run as orchestrate
+    from scripts.orchestration.dry_run import dry_run_validate
+
+    if dry_run:
+        dry_run_validate(config_path, suite_path)
+        click.echo("[+] Configuration is valid.")
+        return
+
+    if not config_path and not suite_path:
+        click.echo("ERROR: Must provide either --config or --suite", err=True)
+        raise SystemExit(1)
+
+    if config_path and suite_path:
+        click.echo("ERROR: --config and --suite are mutually exclusive", err=True)
+        raise SystemExit(1)
+
+    exit_code = orchestrate(
+        config_path=config_path,
+        suite_path=suite_path,
+        output_dir=output_dir,
+        run_id=run_id,
+        skip_plot=skip_plot,
+        benchmark_binary=benchmark_binary,
+    )
+    raise SystemExit(exit_code)
+
+
+@cli.command()
 @click.option('--op', 'op', required=True,
               type=click.Choice(['upload', 'download']),
               help='Operation type')
