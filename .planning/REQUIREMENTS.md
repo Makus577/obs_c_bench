@@ -8,11 +8,11 @@
 
 | REQ-ID | Requirement | Phase | Status |
 |--------|-------------|-------|--------|
-| REQ-01 | 简化 Suite 配置体验 — 提供场景模板生成器 | 1 | Active |
-| REQ-02 | 全流程一键串联 — 压测 → 采样 → 分析 → 对比 → 看板 | 2 | Active |
-| REQ-03 | 增强长稳分析 — analyze_longrun.py 支持更多指标 | 3 | Active |
-| REQ-04 | 简化场景配置维数 — 智能默认值 + 参数继承 | 1 | Active |
-| REQ-05 | CI 门禁增强 — 支持更多性能指标门禁 | 3 | Active |
+| REQ-01 | 简化 Suite 配置体验 — 提供场景模板生成器 | 1 - Configuration Simplification | Active |
+| REQ-02 | 全流程一键串联 — 压测 → 采样 → 分析 → 对比 → 看板 | 2 - One-Click Workflow | Active |
+| REQ-03 | 增强长稳分析 — analyze_longrun.py 支持更多指标 | 3 - Long-Run Enhancement + CI Gates | Active |
+| REQ-04 | 简化场景配置维数 — 智能默认值 + 参数继承 | 1 - Configuration Simplification | Active |
+| REQ-05 | CI 门禁增强 — 支持更多性能指标门禁 | 3 - Long-Run Enhancement + CI Gates | Active |
 
 ---
 
