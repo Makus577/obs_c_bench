@@ -9,6 +9,13 @@ import sys
 from statistics import mean
 from typing import Dict, List, Optional
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None  # type: ignore
+
 from archive_compare_lib import (
     clean_text,
     ensure_directory,
@@ -163,6 +170,16 @@ def build_summary(samples: List[Dict[str, Optional[float]]], archive_row: Dict[s
     rss_slope = fit_slope(rss_times, rss_values) if len(rss_points) >= 2 else None
     rss_slope_mb_per_hour = None if rss_slope is None else rss_slope * 3600.0
 
+    # Find timestamp where success_rate reached its minimum
+    success_rate_min_timestamp = None
+    if success_values and valid_samples:
+        min_sr = min(success_values)
+        for row in valid_samples:
+            sr = row.get("Success_Rate(%)")
+            if sr is not None and sr == min_sr:
+                success_rate_min_timestamp = row.get("RunTime(s)")
+                break
+
     summary.update(
         {
             "rss_start_mb": rss_start,
@@ -183,6 +200,7 @@ def build_summary(samples: List[Dict[str, Optional[float]]], archive_row: Dict[s
             "bps_end": bps_end,
             "bps_drift_pct": compute_drift(bps_start, bps_end),
             "success_rate_min_pct": min(success_values) if success_values else None,
+            "success_rate_min_timestamp": success_rate_min_timestamp,
             "success_rate_end_pct": success_end,
             "longrun_status": "PASS",
             "suspicions": [],
@@ -256,6 +274,7 @@ def write_markdown(path: str, summary: Dict[str, object]) -> None:
         "bps_end": "bps_end",
         "bps_drift_pct": "bps_drift_pct",
         "success_rate_min_pct": "success_rate_min_pct",
+        "success_rate_min_timestamp": "success_rate_min_timestamp",
         "success_rate_end_pct": "success_rate_end_pct",
     }
     with open(path, "w", encoding="utf-8") as handle:
@@ -290,6 +309,7 @@ def write_markdown(path: str, summary: Dict[str, object]) -> None:
             "bps_end",
             "bps_drift_pct",
             "success_rate_min_pct",
+            "success_rate_min_timestamp",
             "success_rate_end_pct",
         ]:
             value = summary.get(key)
@@ -309,6 +329,61 @@ def write_markdown(path: str, summary: Dict[str, object]) -> None:
                 handle.write(f"- `{item}`\n")
         else:
             handle.write("- None\n")
+
+
+def write_trend_png(samples: List[Dict[str, Optional[float]]], output_path: str) -> None:
+    """Generate tri-axis trend chart: RSS (MB), TPS, Success Rate (%) vs RunTime(s)."""
+    if plt is None:
+        return
+    valid = [row for row in samples if row.get("RunTime(s)") is not None]
+    if not valid:
+        return
+
+    # Cap at 10000 points to limit matplotlib memory (threat T-03-01)
+    if len(valid) > 10000:
+        step = len(valid) // 10000
+        valid = valid[::step]
+
+    runtimes = [row["RunTime(s)"] for row in valid]
+    rss = [row.get("RSS(MB)") for row in valid]
+    tps = [row.get("Interval_TPS") for row in valid]
+    sr = [row.get("Success_Rate(%)") for row in valid]
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    # RSS on left axis (blue)
+    color_rss = "tab:blue"
+    ax1.set_xlabel("RunTime (s)")
+    ax1.set_ylabel("RSS (MB)", color=color_rss)
+    ax1.plot(runtimes, rss, color=color_rss, label="RSS (MB)", linewidth=1.0)
+    ax1.tick_params(axis="y", labelcolor=color_rss)
+    ax1.grid(True, alpha=0.3)
+
+    # TPS on center axis (green) — share x-axis
+    ax2 = ax1.twinx()
+    color_tps = "tab:green"
+    ax2.set_ylabel("Interval TPS", color=color_tps)
+    ax2.plot(runtimes, tps, color=color_tps, label="TPS", linewidth=1.0)
+    ax2.tick_params(axis="y", labelcolor=color_tps)
+
+    # Success Rate on right axis (red)
+    ax3 = ax1.twinx()
+    color_sr = "tab:red"
+    ax3.set_ylabel("Success Rate (%)", color=color_sr)
+    ax3.plot(runtimes, sr, color=color_sr, label="Success Rate (%)", linewidth=1.0)
+    ax3.tick_params(axis="y", labelcolor=color_sr)
+    # Offset the third axis to avoid overlap with the second
+    ax3.spines["right"].set_position(("outward", 60))
+
+    plt.title("Long-Run Trend: RSS / TPS / Success Rate")
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    lines3, labels3 = ax3.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
 
 
 def main() -> int:
@@ -333,6 +408,8 @@ def main() -> int:
 
         json_path = os.path.join(args.output_dir, "longrun_summary.json")
         md_path = os.path.join(args.output_dir, "longrun_summary.md")
+        png_path = os.path.join(args.output_dir, "longrun_trend.png")
+        write_trend_png(samples, png_path)
         with open(json_path, "w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2, ensure_ascii=False)
         write_markdown(md_path, summary)
@@ -340,6 +417,7 @@ def main() -> int:
         print(f"[+] Scenario: {summary.get('scenario_id')}")
         print(f"[+] longrun_summary.json -> {json_path}")
         print(f"[+] longrun_summary.md   -> {md_path}")
+        print(f"[+] longrun_trend.png    -> {png_path}")
         print(f"[+] Long-run status: {summary.get('longrun_status')}")
 
         if args.gate and summary.get("longrun_status") == "FAIL":
