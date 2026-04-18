@@ -2,7 +2,7 @@
 
 ## Phases
 
-- [ ] **Phase 1: Configuration Simplification** — Template generator + smart defaults
+- [x] **Phase 1: Configuration Simplification** — Template generator + smart defaults (completed 2026-04-18)
 - [ ] **Phase 2: One-Click Workflow** — End-to-end pipeline orchestration
 - [ ] **Phase 3: Long-Run Enhancement + CI Gates** — Extended metrics and statistical gates
 
@@ -23,7 +23,10 @@
 3. User can use `defaults:` block to specify shared parameters once, with scenarios inheriting them
 4. User receives validation errors for invalid parameters (threads <= 0, object_size <= 0) before execution
 
-**Plans:** TBD
+**Plans:** 1/1 plans complete
+
+**Plan list:**
+- [x] 01-01-PLAN.md — Template generator CLI with smoke/perf/longrun templates, smart defaults, validation, and --explain output
 
 ---
 
@@ -69,7 +72,7 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Configuration Simplification | 0/4 | Not started | - |
+| 1. Configuration Simplification | 1/1 | Complete    | 2026-04-18 |
 | 2. One-Click Workflow | 0/4 | Not started | - |
 | 3. Long-Run Enhancement + CI Gates | 0/4 | Not started | - |
 
