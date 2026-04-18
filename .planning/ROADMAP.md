@@ -3,8 +3,8 @@
 ## Phases
 
 - [x] **Phase 1: Configuration Simplification** — Template generator + smart defaults (completed 2026-04-18)
-- [ ] **Phase 2: One-Click Workflow** — End-to-end pipeline orchestration
-- [ ] **Phase 3: Long-Run Enhancement + CI Gates** — Extended metrics and statistical gates
+- [x] **Phase 2: One-Click Workflow** — End-to-end pipeline orchestration (completed 2026-04-18)
+- [x] **Phase 3: Long-Run Enhancement + CI Gates** — Extended metrics and statistical gates (completed 2026-04-18)
 
 ## Phase Details
 
@@ -67,7 +67,10 @@
 3. User can define `gate_policy.json` with thresholds for memory (avg_rss_mb, peak_rss_mb), CPU (avg_cpu_pct, peak_cpu_pct), and bandwidth (avg_single_stream_bps, max_single_stream_bps)
 4. User can see `statistical_significance` field in `perf_gate_result.json` when TPS comparisons use t-test or Mann-Whitney U (p < 0.05 indicates regression)
 
-**Plans:** TBD
+**Plans:** 1/1 plans complete
+
+**Plan list:**
+- [x] 03-01-PLAN.md — Extend analyze_longrun.py with CPU drift, TPS attenuation, success_rate min tracking, and tri-axis trend PNG; enhance perf_gate.py with memory/CPU/bandwidth gates and statistical significance
 
 ---
 ## Progress Table
@@ -75,8 +78,8 @@
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Configuration Simplification | 1/1 | Complete    | 2026-04-18 |
-| 2. One-Click Workflow | 1/1 | Not started | - |
-| 3. Long-Run Enhancement + CI Gates | 0/4 | Not started | - |
+| 2. One-Click Workflow | 1/1 | Complete    | 2026-04-18 |
+| 3. Long-Run Enhancement + CI Gates | 1/1 | Complete    | 2026-04-18 |
 
 ---
 

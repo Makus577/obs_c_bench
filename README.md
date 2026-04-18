@@ -45,6 +45,16 @@
 * 提供配套的 Python 脚本，支持海量分片日志的一键合并、时延排序及 P99/P99.9 长尾计算。
 * 自动生成包含散点图、CDF 累积分布、TPS/带宽趋势、状态码占比的 2x2 高清诊断看板。
 
+* **简化配置体验 (Simplified Configuration)**
+* `python -m scripts.cli template` — 3 键生成完整场景配置（`--op`、`--threads`、`--object-size`）。
+* 支持 `--explain` 查看字段来源（CLI 指定 / 模板默认 / 自动生成）。
+* 提供 `smoke` / `perf` / `longrun` 三种预设模板。
+
+* **全流程一键串联 (One-Click Pipeline)**
+* `python -m scripts.cli run` — 自动化串接：压测 → merge_details → analyze_longrun → perf_gate → plot_report。
+* 支持 `--skip-plot` 跳过绘图、`--dry-run` 仅验证配置、`--output-dir` 指定输出目录。
+* 失败时快速返回非零 exit code。
+
 
 
 ---
