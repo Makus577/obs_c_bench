@@ -1,0 +1,15 @@
+# Smoke template - Fast validation: 5 requests, 2 threads, 1MB
+# Usage: python -m scripts.cli template --op upload --threads 2 --object-size 1MB --template smoke
+suite_id: smoke_template
+defaults:
+  users_file: ./users.dat
+  requests_per_thread: 5
+profiles:
+  base:
+    config_file: ./config.dat
+scenarios:
+  - scenario_id: smoke_upload_1mb_2t
+    profile: base
+    op: upload
+    threads: 2
+    object_size: 1MB

@@ -1,0 +1,16 @@
+# Long-run stability template - 3600s, 64 threads, 4MB
+# Usage: python -m scripts.cli template --op upload --threads 64 --object-size 4MB --template longrun
+suite_id: longrun_template
+defaults:
+  users_file: ./users.dat
+  run_seconds: 3600
+profiles:
+  base:
+    config_file: ./config.dat
+scenarios:
+  - scenario_id: longrun_upload_4mb_64t
+    profile: base
+    op: upload
+    threads: 64
+    object_size: 4MB
+    analyze_longrun: true

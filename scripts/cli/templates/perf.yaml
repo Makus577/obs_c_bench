@@ -1,0 +1,15 @@
+# Performance template - 100 requests, 64-128 threads, various sizes
+# Usage: python -m scripts.cli template --op upload --threads 128 --object-size 1MB --template perf
+suite_id: perf_template
+defaults:
+  users_file: ./users.dat
+  requests_per_thread: 100
+profiles:
+  base:
+    config_file: ./config.dat
+scenarios:
+  - scenario_id: perf_upload_1mb_128t
+    profile: base
+    op: upload
+    threads: 128
+    object_size: 1MB
