@@ -2,11 +2,19 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import csv
 import json
 import os
 import sys
 
+try:
+    from scipy.stats import ttest_ind, mannwhitneyu
+except ImportError:
+    ttest_ind = None  # type: ignore
+    mannwhitneyu = None  # type: ignore
+
 from archive_compare_lib import (
+    clean_text,
     compare_archives,
     ensure_directory,
     load_archive_row,
@@ -20,17 +28,104 @@ from archive_compare_lib import (
 )
 
 
-def evaluate_gate(compare_result, metric_specs):
+def compute_statistical_significance(baseline_samples, candidate_samples, direction):
+    """Run Mann-Whitney U or t-test on two sample lists; return significance dict."""
+    n_b, n_c = len(baseline_samples), len(candidate_samples)
+    if n_b < 30 or n_c < 30:
+        return {
+            "test_type": None,
+            "p_value": None,
+            "is_significant": False,
+            "reason": "insufficient_samples",
+            "n_baseline": n_b,
+            "n_candidate": n_c,
+        }
+    if mannwhitneyu is not None:
+        try:
+            stat, p = mannwhitneyu(baseline_samples, candidate_samples, alternative="two-sided")
+            return {
+                "test_type": "mannwhitneyu",
+                "p_value": float(p),
+                "is_significant": p < 0.05,
+                "n_baseline": n_b,
+                "n_candidate": n_c,
+            }
+        except Exception:
+            pass
+    if ttest_ind is not None:
+        try:
+            t_stat, p = ttest_ind(baseline_samples, candidate_samples, equal_var=False)
+            return {
+                "test_type": "t-test",
+                "p_value": float(p),
+                "is_significant": p < 0.05,
+                "n_baseline": n_b,
+                "n_candidate": n_c,
+            }
+        except Exception:
+            pass
+    return {
+        "test_type": None,
+        "p_value": None,
+        "is_significant": False,
+        "reason": "test_failed",
+        "n_baseline": n_b,
+        "n_candidate": n_c,
+    }
+
+
+def load_realtime_samples(path):
+    """Load realtime.txt as list of dicts with float values."""
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            row = {}
+            for key, value in raw.items():
+                text = clean_text(value)
+                if text == "" or text == "-1":
+                    row[key] = None
+                else:
+                    try:
+                        row[key] = float(text)
+                    except ValueError:
+                        row[key] = None
+            rows.append(row)
+    return rows
+
+
+def evaluate_gate(compare_result, metric_specs, baseline_samples=None, candidate_samples=None):
     rows = []
     failed_metrics = []
     warned_metrics = []
     skipped_metrics = []
+
+    # Map metric names to realtime sample column names
+    sample_col_map = {
+        "final_tps": "Interval_TPS",
+        "peak_tps": "Interval_TPS",
+        "avg_latency_ms": None,
+        "p99_latency_ms": None,
+    }
 
     for row in compare_result["rows"]:
         metric_name = row["metric"]
         spec = metric_specs.get(metric_name, {})
         enabled = bool(spec.get("enabled", False))
         gate_row = dict(row)
+
+        # Attach statistical significance if realtime samples are available
+        sig_result = None
+        if baseline_samples and candidate_samples:
+            col_name = sample_col_map.get(metric_name)
+            if col_name:
+                b_vals = [r[col_name] for r in baseline_samples if r.get(col_name) is not None]
+                c_vals = [r[col_name] for r in candidate_samples if r.get(col_name) is not None]
+                direction = spec.get("direction", row.get("direction", "higher"))
+                sig_result = compute_statistical_significance(b_vals, c_vals, direction)
+        gate_row["statistical_significance"] = sig_result
 
         if not enabled:
             gate_row["gate_status"] = "INFO"
@@ -121,6 +216,8 @@ def main():
     parser.add_argument("--policy", required=True, help="Path to gate policy JSON/YAML file")
     parser.add_argument("--baselines-manifest", help="Path to baseline manifest CSV/JSON")
     parser.add_argument("--scenario-id", help="Scenario id used to resolve baseline from the manifest")
+    parser.add_argument("--baseline-realtime", help="Path to baseline realtime.txt for statistical significance testing")
+    parser.add_argument("--candidate-realtime", help="Path to candidate realtime.txt for statistical significance testing")
     parser.add_argument("--output-dir", default=None, help="Directory for compare/gate output files")
     args = parser.parse_args()
 
@@ -141,6 +238,15 @@ def main():
             raise ValueError("Either --baseline or --baselines-manifest must be provided.")
 
         baseline_row = load_archive_row(baseline_path)
+
+        # Load realtime samples for statistical significance testing
+        baseline_realtime_samples = []
+        if args.baseline_realtime:
+            baseline_realtime_samples = load_realtime_samples(args.baseline_realtime)
+        candidate_realtime_samples = []
+        if args.candidate_realtime:
+            candidate_realtime_samples = load_realtime_samples(args.candidate_realtime)
+
         policy = load_policy_file(args.policy)
         metric_specs = merge_metric_specs(policy)
         compare_result = compare_archives(
@@ -167,8 +273,25 @@ def main():
                 "rows": compare_result["rows"],
             }
         else:
-            evaluation = evaluate_gate(compare_result, metric_specs)
+            evaluation = evaluate_gate(
+                compare_result,
+                metric_specs,
+                baseline_samples=baseline_realtime_samples,
+                candidate_samples=candidate_realtime_samples,
+            )
             compare_result["rows"] = evaluation["rows"]
+
+            # Collect statistical_significance entries from rows that have it
+            sig_entries = []
+            for r in evaluation["rows"]:
+                if r.get("statistical_significance") is not None:
+                    sig_entries.append(
+                        {
+                            "metric": r["metric"],
+                            "statistical_significance": r["statistical_significance"],
+                        }
+                    )
+
             gate_result = {
                 "overall_status": evaluation["overall_status"],
                 "exit_code": 1 if evaluation["failed_metrics"] else 0,
@@ -180,6 +303,7 @@ def main():
                 "warned_metrics": evaluation["warned_metrics"],
                 "skipped_metrics": evaluation["skipped_metrics"],
                 "advisory_mismatches": compare_result.get("advisory_mismatches", []),
+                "statistical_significance": sig_entries,
                 "rows": evaluation["rows"],
             }
 
